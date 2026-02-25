@@ -1,0 +1,10 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "distributed-processing"
+version = "0.0.1a"
+description = "Computación distribuída."
+requires-python = ">=3.9"
+dependencies = ["redis"]
