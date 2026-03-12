@@ -5,7 +5,6 @@ import time
 import fs_structs
 
 
-
 def sleep(a, b=None):
     if b is None:
         time.sleep(a)
@@ -25,21 +24,20 @@ class FileSystemConnector(object):
         self.with_watchdog = True
 
         self.pop_sleep = (5, 10)  # sólo si with_watchdog es False
-        
+
         self.pop_timeout = 60
         self.pop_watchdog_timeout = 60
         self.pop_sleep_watchdog = (0.0, 0.1)
-        
+
         self.lock_pop_timeout = 10
         self.lock_pop_watchdog_timeout = 2
         self.lock_pop_wait = (0.0, 0.1)
-        
+
         self.registry_timeout = 10
 
         self.lock_registry_timeout = 60
         self.lock_registry_watchdog_timeout = 10
         self.lock_registry_wait = (0.0, 0.1)
-
 
     def clean_namespace(self):
         "Borra todos los objetos vinculados al namespace"
@@ -56,19 +54,25 @@ class FileSystemConnector(object):
         return id_str.split(":")[0] + "_responses"
 
     def get_client_id(self):
-        with fs_structs.structs.lock_context(self.variables.base_path, "nclients_lock", 
-                                          self.lock_registry_timeout, 
-                                          self.lock_registry_watchdog_timeout, 
-                                          self.lock_registry_wait):
+        with fs_structs.structs.lock_context(
+            self.variables.base_path,
+            "nclients_lock",
+            self.lock_registry_timeout,
+            self.lock_registry_watchdog_timeout,
+            self.lock_registry_wait,
+        ):
             nclients = self.variables.get("nclients", 0) + 1
             self.variables["nclients"] = nclients
         return f"fs_client_{nclients}"
 
     def get_server_id(self):
-        with fs_structs.structs.lock_context(self.variables.base_path, "nservers_lock",                                           
-                                          self.lock_registry_timeout, 
-                                          self.lock_registry_watchdog_timeout, 
-                                          self.lock_registry_wait):
+        with fs_structs.structs.lock_context(
+            self.variables.base_path,
+            "nservers_lock",
+            self.lock_registry_timeout,
+            self.lock_registry_watchdog_timeout,
+            self.lock_registry_wait,
+        ):
             nservers = self.variables.get("nservers", 0) + 1
             self.variables["nservers"] = nservers
         return f"fs_server_{nservers}"
@@ -82,10 +86,13 @@ class FileSystemConnector(object):
         """
         registry = {}
 
-        with fs_structs.structs.lock_context(self.variables.base_path, "registry_lock", 
-                                          self.lock_registry_timeout, 
-                                          self.lock_registry_watchdog_timeout, 
-                                          self.lock_registry_wait):
+        with fs_structs.structs.lock_context(
+            self.variables.base_path,
+            "registry_lock",
+            self.lock_registry_timeout,
+            self.lock_registry_watchdog_timeout,
+            self.lock_registry_wait,
+        ):
             method_queues = [x for x in self.variables.keys() if "method_queues_" in x]
 
             for method_set in method_queues:
@@ -119,10 +126,13 @@ class FileSystemConnector(object):
             for method in func_dict:
                 registry[method] = registry.get(method, []) + [queue_name]
 
-        with fs_structs.structs.lock_context(self.variables.base_path, "registry_lock",
-                                          self.lock_registry_timeout, 
-                                          self.lock_registry_watchdog_timeout, 
-                                          self.lock_registry_wait):
+        with fs_structs.structs.lock_context(
+            self.variables.base_path,
+            "registry_lock",
+            self.lock_registry_timeout,
+            self.lock_registry_watchdog_timeout,
+            self.lock_registry_wait,
+        ):
             for method in registry:
                 method_set = f"method_queues_{method}"
                 tmp = self.variables.get(method_set, set())
@@ -161,35 +171,39 @@ class FileSystemConnector(object):
             - Used by clients
             - Supports both watchdog and polling modes
         """
+
         def try_pop(queue_name, queue):
             try:
                 # using pop(0) instead of pop_left. Expected only one client per results queue.
-                return (queue_name, queue.pop(0))  
+                return (queue_name, queue.pop(0))
             except (IndexError, KeyError):
                 return False
 
         queue = self.namespace.list(queue_name)
 
-        if ok:=try_pop(queue_name, queue):
-            return ok  
-        
+        if ok := try_pop(queue_name, queue):
+            return ok
+
         start_time = time.time()
         time_left = timeout
         wait_forever = True if timeout < -0.001 else False
         while time_left > 0.0 or wait_forever:
-            new_watchdog_timeout = self.pop_watchdog_timeout if wait_forever else min(self.pop_watchdog_timeout, time_left)
+            new_watchdog_timeout = (
+                self.pop_watchdog_timeout
+                if wait_forever
+                else min(self.pop_watchdog_timeout, time_left)
+            )
             if self.with_watchdog:
                 _ = fs_structs.watchdog.wait_until_file_event(
-                    [queue.base_path], [], ["created"], 
-                    timeout=new_watchdog_timeout
+                    [queue.base_path], [], ["created"], timeout=new_watchdog_timeout
                 )
                 # Wait random time to minimize probability of race conditions
                 sleep(*self.pop_sleep_watchdog)
             else:
                 sleep(*self.pop_sleep)  # Standard polling delay
-            
-            if ok:=try_pop(queue_name, queue):
-                return ok  
+
+            if ok := try_pop(queue_name, queue):
+                return ok
 
             time_left = timeout - (time.time() - start_time)
         return None  # Timeout reached
@@ -208,21 +222,27 @@ class FileSystemConnector(object):
             - Used by workers
             - Checks queues in order until item is found
             - Supports both watchdog and polling modes
-        """          
-        def try_pop_multiple(queue_refs, timeout=self.lock_pop_timeout, watchdog_timeout=self.lock_pop_watchdog_timeout, wait=self.lock_pop_wait ):
+        """
+
+        def try_pop_multiple(
+            queue_refs,
+            timeout=self.lock_pop_timeout,
+            watchdog_timeout=self.lock_pop_watchdog_timeout,
+            wait=self.lock_pop_wait,
+        ):
             for q_name, queue in queue_refs:
                 try:
                     return (q_name, queue.pop_left(timeout, watchdog_timeout, wait))
                 except (IndexError, KeyError):
                     continue
             return False
-    
+
         queue_refs = [(q, self.namespace.list(q)) for q in queue_names]
 
         # Walrus operator, introduced in Python 3.8
-        if ok:=try_pop_multiple(queue_refs):
+        if ok := try_pop_multiple(queue_refs):
             return ok
-      
+
         if self.with_watchdog:
             watch_paths = [q[1].base_path for q in queue_refs]
 
@@ -230,19 +250,25 @@ class FileSystemConnector(object):
         time_left = timeout
         wait_forever = True if timeout < -0.001 else False
         while time_left > 0.0 or wait_forever:
-            new_watchdog_timeout = self.pop_watchdog_timeout if wait_forever else min(self.pop_watchdog_timeout, time_left)
+            new_watchdog_timeout = (
+                self.pop_watchdog_timeout
+                if wait_forever
+                else min(self.pop_watchdog_timeout, time_left)
+            )
 
             if self.with_watchdog:
                 _ = fs_structs.watchdog.wait_until_file_event(
-                    watch_paths, [], ["created"], 
+                    watch_paths,
+                    [],
+                    ["created"],
                     timeout=new_watchdog_timeout,
                 )
                 sleep(*self.pop_sleep_watchdog)
             else:
                 sleep(*self.pop_sleep)
             # Walrus operator, introduced in Python 3.8
-            if ok:=try_pop_multiple(queue_refs):
-                return ok  
+            if ok := try_pop_multiple(queue_refs):
+                return ok
 
             time_left = timeout - (time.time() - start_time)
 

@@ -11,25 +11,35 @@ from .messages import is_ack, is_batch_response, is_single_response, single_requ
 
 logger = logging.getLogger(__name__)
 
+
 def timestamp():
     return datetime.now().isoformat()
+
 
 def serialize_python_call(fn, args=[], kwargs={}):
     pickled_fn = dill.dumps(fn)
     # Decode ascii necesario para que no de error de bytes object no serializable
-    return [base64.b64encode(pickled_fn).decode('ascii'), args, kwargs]
+    return [base64.b64encode(pickled_fn).decode("ascii"), args, kwargs]
 
 
-class Client():
-    def __init__(self, serializer, connector, client_id=None, check_registry="cache",
-                 use_reply_to=False, default_queue="default", timeout=24*60*60):
+class Client:
+    def __init__(
+        self,
+        serializer,
+        connector,
+        client_id=None,
+        check_registry="cache",
+        use_reply_to=False,
+        default_queue="default",
+        timeout=24 * 60 * 60,
+    ):
         self.serializer = serializer
         self.connector = connector
 
         self.use_reply_to = use_reply_to
-        
-        # Cache for pending responses with id. 
-        # ids as keys and time() of message creation as values. 
+
+        # Cache for pending responses with id.
+        # ids as keys and time() of message creation as values.
         self.pending = {}
         # Cache for responses with id.
         # ids as keys and deserialized responses as values.
@@ -50,13 +60,16 @@ class Client():
         if check_registry == "cache":
             self.update_registry_cache()
 
-        self.client_id = client_id if client_id is not None else self.connector.get_client_id()
+        self.client_id = (
+            client_id if client_id is not None else self.connector.get_client_id()
+        )
         logger.info(f"Client with id: {self.client_id}")
 
         self.responses_queue = self.connector.get_responses_queue(self.client_id)
         logger.info(f"Results queue: {self.responses_queue}")
-        logger.debug(f"{timestamp()} Client: {self.client_id} with responses queue: {self.responses_queue} connected")
-
+        logger.debug(
+            f"{timestamp()} Client: {self.client_id} with responses queue: {self.responses_queue} connected"
+        )
 
         self.last_request_idnumber = 0
         self.last_request_id = None
@@ -79,20 +92,20 @@ class Client():
     def select_queue(self, method):
         """Selects a queue where the request with the method is going to be sent.
 
-       Selects the queue based on:
-                - If client's `check_registry` is 'always', calls the `random_queue_for_method` of the
-                    connector instance (connector attribute of the client's instance).
-                - If client's `check_registry` is 'cache', choose a random queue from the available
-                    queues for the method based on the information available in the client's cache.
-                    The information should be updated with the `update_registry_cache` method.
-                - Client's `default_requests_queue` attribute otherwise.
+        Selects the queue based on:
+                 - If client's `check_registry` is 'always', calls the `random_queue_for_method` of the
+                     connector instance (connector attribute of the client's instance).
+                 - If client's `check_registry` is 'cache', choose a random queue from the available
+                     queues for the method based on the information available in the client's cache.
+                     The information should be updated with the `update_registry_cache` method.
+                 - Client's `default_requests_queue` attribute otherwise.
 
-        Args:
-            method (str): method to request.
+         Args:
+             method (str): method to request.
 
-        Returns:
-            str: Queue where the request with the method is going to be sent.       
-        
+         Returns:
+             str: Queue where the request with the method is going to be sent.
+
         """
         if self.check_registry == "always":
             requests_queue = self.connector.random_queue_for_method(method)
@@ -101,12 +114,14 @@ class Client():
 
         elif self.check_registry == "cache":
             if method not in self.registry:
-                # If `update_registry` is called every time, 'cache' is, 
+                # If `update_registry` is called every time, 'cache' is,
                 # in practice, equivalent to 'always'.
                 if method not in self.registry:
                     self.update_registry_cache()
                 if method not in self.registry:
-                    raise ValueError(f"Method {method} does not exist/is not available.")
+                    raise ValueError(
+                        f"Method {method} does not exist/is not available."
+                    )
 
             available = self.registry[method]
             requests_queue = random.choice(available)
@@ -116,44 +131,54 @@ class Client():
 
         return requests_queue
 
-    def send_single_request(self, method, args=None, kwargs=None, queue=None, id=None, 
-                            reply_to=None, ack=None, is_notification=False, **options):
+    def send_single_request(
+        self,
+        method,
+        args=None,
+        kwargs=None,
+        queue=None,
+        id=None,
+        reply_to=None,
+        ack=None,
+        is_notification=False,
+        **options,
+    ):
         """Sends a single RPC `request`.
-        
-        If no `id` is provided and `is_notification` is False, generates a new one. 
-        Reusing an `id` constitutes a retry; the first response that is available 
+
+        If no `id` is provided and `is_notification` is False, generates a new one.
+        Reusing an `id` constitutes a retry; the first response that is available
         will be used (with no guaranties).
-        
+
         Args:
             method (str): Remote function name.
             args (list, optional): Positional arguments for the remote function. Defaults to None.
             kwargs (dict, optional): Keyword arguments for the remote function. Defaults to None.
             id (str, optional): Request identifier. Defaults to None. If None, generates a new `id`.
-                If `is_notification` is True, `id` is not defined. 
+                If `is_notification` is True, `id` is not defined.
             reply_to (str, optional): Response queue name to be added to the `request` message as the
-                `reply_to` key. Defaults to None. Not included in the JSON RPC 2.0 specification. 
+                `reply_to` key. Defaults to None. Not included in the JSON RPC 2.0 specification.
                 If None and the Client's `use_reply_to` is True, uses the Client's `responses_queue` attribute.
                 Doesn't set `reply_to` otherwise. If `reply_to` is not defined in the `request`
-                message, the worker can response guessing the `response_queue` from de `request` `id`.  
-            queue (str, optional): Queue to send the request to. Defaults to None. If None, selects 
+                message, the worker can response guessing the `response_queue` from de `request` `id`.
+            queue (str, optional): Queue to send the request to. Defaults to None. If None, selects
                 the queue based on:
                 - Available queues for the method if client's `check_registry` is 'always' or 'cache'
                 - Client's `default_requests_queue` attribute otherwise.
             ack (bool, optional): True if the worker sends a ack message when the request is received. False or
                 None otherwise. Defaults to None.
-            is_notification (bool): True if is a `notification` (a `request` with no `id`). 
+            is_notification (bool): True if is a `notification` (a `request` with no `id`).
                 Defaults to False.
             **options: Additional arguments added to the RPC message under the 'options' key.
-        
+
         Returns:
             tuple[str, str]: A tuple containing (request `id`, queue name)
 
         """
         if queue is not None:
-            requests_queue=queue
+            requests_queue = queue
         else:
             requests_queue = self.select_queue(method)
-        
+
         if not is_notification:
             id_ = self.generate_id() if id is None else id
         else:
@@ -162,14 +187,23 @@ class Client():
         if reply_to is None:
             reply_to = None if not self.use_reply_to else self.responses_queue
 
-        sr = single_request(method, args=args, kwargs=kwargs, id=id_,
-                            reply_to=reply_to, ack=ack, is_notification=is_notification,  
-                            **options)
-        
+        sr = single_request(
+            method,
+            args=args,
+            kwargs=kwargs,
+            id=id_,
+            reply_to=reply_to,
+            ack=ack,
+            is_notification=is_notification,
+            **options,
+        )
+
         serialized_sr = self.serializer.dumps(sr)
 
         self.connector.enqueue(requests_queue, serialized_sr)
-        logger.debug(f"{timestamp()} Client: {self.client_id} sent request with id: {id_} to queue: {requests_queue}")
+        logger.debug(
+            f"{timestamp()} Client: {self.client_id} sent request with id: {id_} to queue: {requests_queue}"
+        )
 
         self.pending[id_] = time.time()
         return id_, requests_queue
@@ -188,9 +222,11 @@ class Client():
 
         return requests_queues
 
-    def send_batch_request(self, requests_lst, queue=None, retry=None, ack=None, **options):
+    def send_batch_request(
+        self, requests_lst, queue=None, retry=None, ack=None, **options
+    ):
         """Sends an batch request that will be executed by a single worker.
-    
+
         Args:
             requests_lst (list): List of tuples [(method, args, kwargs), ...].
                 The tuples match the first tree positional args of the `single_request`
@@ -198,13 +234,13 @@ class Client():
                 use the default values for the `single_request` args that are not in the tuple.
             queue (str, optional): Queue to send the batch request to. Defaults to None.
                 If None, selects randomly one of the common queues available for all the methods
-                in `requests_lst`.  
+                in `requests_lst`.
             retry (bool): Include requests info in the AsyncResult objects in
                 order to make posible retrying every individual request. Defaults to False.
             ack (bool, optional): True if the worker sends a ack message when the request is received. False or
                 None otherwise. Defaults to None.
             **options: Additional arguments added to the each individual request under the 'options' key.
-        
+
         Returns:
             list(str): List of ids of the individual sent requests.
 
@@ -219,24 +255,38 @@ class Client():
 
         if len(requests_queues) == 0:
             raise ValueError("No common queue for batch request.")
-        
+
         if queue is not None:
             if queue not in requests_queues:
-                raise ValueError(f"{queue} not in common available queues for batch request.")
+                raise ValueError(
+                    f"{queue} not in common available queues for batch request."
+                )
         else:
             queue = random.choice(requests_queues)
 
         reply_to = None if not self.use_reply_to else self.responses_queue
 
-        batch_request = [single_request(t[0], args=t[1], kwargs=t[2], id=self.generate_id(),
-                                        is_notification=False, reply_to=reply_to, **options) for t in requests_lst]
+        batch_request = [
+            single_request(
+                t[0],
+                args=t[1],
+                kwargs=t[2],
+                id=self.generate_id(),
+                is_notification=False,
+                reply_to=reply_to,
+                **options,
+            )
+            for t in requests_lst
+        ]
 
         serialized_br = self.serializer.dumps(batch_request)
 
         self.connector.enqueue(queue, serialized_br)
 
         ids = [t["id"] for t in batch_request]
-        logger.debug(f"{timestamp()} Client: {self.client_id} sent batch request with {len(ids)} requests to queue: {queue}")
+        logger.debug(
+            f"{timestamp()} Client: {self.client_id} sent batch request with {len(ids)} requests to queue: {queue}"
+        )
 
         for id in ids:
             self.pending[id] = time.time()
@@ -249,19 +299,19 @@ class Client():
         Args:
             raw_responses (list): List of responses (serialized), usually from pop or pop_all.
 
-        Returns: 
+        Returns:
             tuple [dict, list, list, dict]: (results_dict, no_id, parse_errors, acks_dict)
 
             results_dict (dict): Dictionary with the ids of the request as keys
-                and the deserialized response as value. The deserialized response 
-                is a dict with either the key "result" or "error". The get method 
-                of the AsyncResult instance, associated with the id, returns the "result", 
-                if available, or throws an exception with the information in "error".                    
+                and the deserialized response as value. The deserialized response
+                is a dict with either the key "result" or "error". The get method
+                of the AsyncResult instance, associated with the id, returns the "result",
+                if available, or throws an exception with the information in "error".
             no_id (list): List with all the deserialized responses that have no id (notifications).
             parse_errors (list): List with all the responses that failed to be deserialized.
             acks_dict (dict):  Dictionary with the ids of the request as keys
                 and the deserialized ACKS as value.
-        
+
         """
         results_dict = {}
         acks_dict = {}
@@ -273,47 +323,65 @@ class Client():
                 r = self.serializer.loads(e)
             except:
                 parse_errors.append(e)
-                logger.debug(f"{timestamp()} Client: {self.client_id} a Message could NOT be deserialized")
+                logger.debug(
+                    f"{timestamp()} Client: {self.client_id} a Message could NOT be deserialized"
+                )
                 continue
 
-            if is_batch_response(r):  # Batch response. Not implemented in worker. 
-                logger.debug(f"{timestamp()} Client: {self.client_id} received a Batch Response with {len(r)} items")
+            if is_batch_response(r):  # Batch response. Not implemented in worker.
+                logger.debug(
+                    f"{timestamp()} Client: {self.client_id} received a Batch Response with {len(r)} items"
+                )
                 for rr in r:
                     rr["finished_time"] = time.time()
                     if "id" in rr:
-                        results_dict[rr["id"]] = rr                        
-                        logger.debug(f"{timestamp()} Client: {self.client_id} processed a {'RESULT' if 'error' not in rr else 'ERROR'} with id: {rr['id']} from BATCH response")
+                        results_dict[rr["id"]] = rr
+                        logger.debug(
+                            f"{timestamp()} Client: {self.client_id} processed a {'RESULT' if 'error' not in rr else 'ERROR'} with id: {rr['id']} from BATCH response"
+                        )
 
                     else:
-                        logger.debug(f"{timestamp()} Client: {self.client_id} processed a Notification from BATCH response")
+                        logger.debug(
+                            f"{timestamp()} Client: {self.client_id} processed a Notification from BATCH response"
+                        )
                         no_id.append(rr)
 
             elif is_single_response(r):
                 r["finished_time"] = time.time()
                 if "id" in r:
                     results_dict[r["id"]] = r
-                    logger.debug(f"{timestamp()} Client: {self.client_id} received a Single {'RESULT' if 'error' not in r else 'ERROR'} with id: {r['id']}")
+                    logger.debug(
+                        f"{timestamp()} Client: {self.client_id} received a Single {'RESULT' if 'error' not in r else 'ERROR'} with id: {r['id']}"
+                    )
                 else:
-                    logger.debug(f"{timestamp()} Client: {self.client_id} received a Single Notification")
+                    logger.debug(
+                        f"{timestamp()} Client: {self.client_id} received a Single Notification"
+                    )
             elif is_ack(r):
                 r = r["ack"]
                 acks_dict[r["id"]] = r
-                logger.debug(f"{timestamp()} Client: {self.client_id} received an ACK from worker: {r['worker']} for id: {r['id']}")
-            
+                logger.debug(
+                    f"{timestamp()} Client: {self.client_id} received an ACK from worker: {r['worker']} for id: {r['id']}"
+                )
+
             else:
-                logger.debug(f"{timestamp()} Client: {self.client_id} a Message could NOT be processed")                
+                logger.debug(
+                    f"{timestamp()} Client: {self.client_id} a Message could NOT be processed"
+                )
 
         return results_dict, no_id, parse_errors, acks_dict
 
     def _update_responses_cache(self, raw_responses):
-        """Deserialize raw_responses and update caches. 
+        """Deserialize raw_responses and update caches.
 
         Updates the client caches responses, notifications, responses_parse_errors and pending.
 
         Args:
             raw_responses (list): List of responses (serialized), usually from pop or pop_all.
         """
-        responses_dict, no_id, parse_errors, acks_dict = self._responses_to_dicts(raw_responses)
+        responses_dict, no_id, parse_errors, acks_dict = self._responses_to_dicts(
+            raw_responses
+        )
         self.responses.update(responses_dict)
         self.notifications.append(no_id)
         self.responses_parse_errors.append(parse_errors)
@@ -341,10 +409,10 @@ class Client():
             ids (list, optional): List of ids. Defaults to None.
             timeout (float, optional): Defaults to None (self.timeout).
                 If 0, check queue once.
-        
+
         Returns:
             list: Pending ids if timeout, [] if ok.
-       
+
         Raises:
             TimeoutError
             ValueError: If there are ids neither in responses nor in pending.
@@ -355,14 +423,16 @@ class Client():
         if ids is None:
             ids = [k for k in self.pending.keys()]
         else:
-            tmp = [k for k in ids if k not in self.responses and k not in self.pending]    
+            tmp = [k for k in ids if k not in self.responses and k not in self.pending]
             if len(tmp) > 0:
-                raise ValueError(f"wait_responses: {tmp} neither in responses nor in pending.")
+                raise ValueError(
+                    f"wait_responses: {tmp} neither in responses nor in pending."
+                )
 
         pending = [k for k in ids if k not in self.responses]
 
-        if len(pending)>0:
-            self._update_cache_with_all_available_responses() 
+        if len(pending) > 0:
+            self._update_cache_with_all_available_responses()
         else:
             return []
 
@@ -375,10 +445,12 @@ class Client():
             t_0 = time.time()
             forever, time_left = False, timeout
 
-        while (len(pending)>0) and ((time_left > 0.000001) or forever):
+        while (len(pending) > 0) and ((time_left > 0.000001) or forever):
             next_resp = self.connector.pop(self.responses_queue, timeout=time_left)
 
-            if next_resp is not None:  # if None then timeout, if not (queue_name, value)
+            if (
+                next_resp is not None
+            ):  # if None then timeout, if not (queue_name, value)
                 self._update_responses_cache([next_resp[1]])
 
             if not forever:
@@ -398,12 +470,12 @@ class Client():
             timeout (float, optional): Defaults to None (self.timeout).
                 If 0, check queue once.
             clean (bool, optional): If True remove the result from cache.
-                Defaults to True. 
-        
+                Defaults to True.
+
         Returns:
-            dict: Response deserialized, with either the keys "result" or "error". 
-                The get method of the AsyncResult instance, associated with the id, 
-                returns the "result", if available, or throws an exception with the 
+            dict: Response deserialized, with either the keys "result" or "error".
+                The get method of the AsyncResult instance, associated with the id,
+                returns the "result", if available, or throws an exception with the
                 information in "error".
 
         Raises:
@@ -415,15 +487,14 @@ class Client():
 
         response = self.responses[id]
         self.responses_used.add(id)
-        
+
         if clean:
             del self.responses[id]
 
         return response
 
     def clean_used(self):
-        """Clean all responses that have been used at least once.
-        """
+        """Clean all responses that have been used at least once."""
         responses = [k for k in self.responses]
         for id in responses:
             if id in self.responses_used:
@@ -431,12 +502,12 @@ class Client():
 
     def rpc_async(self, method, args=[], kwargs={}, queue=None, retry=False, ack=None):
         """Sends an asynchronous single request.
-    
+
         Args:
             method (str): Remote function name.
             args (list): Positional args. Defaults to [].
             kwargs (dict): Named args. Defaults to {}.
-            queue (str, optional): Queue to send the request to. Defaults to None. 
+            queue (str, optional): Queue to send the request to. Defaults to None.
                 If None, selects the queue based on:
                 - Available queues for the method if client's `check_registry` is 'always' or 'cache'
                 - Client's `default_requests_queue` attribute otherwise.
@@ -444,7 +515,7 @@ class Client():
                 order to make posible retrying the request. Defaults to False.
             ack (bool, optional): True if the worker sends a ack message when the request is received. False or
                 None otherwise. Defaults to None.
-        
+
         Returns:
             AsyncResult
         """
@@ -454,18 +525,18 @@ class Client():
 
     def rpc_sync(self, method, args=[], kwargs={}, queue=None, timeout=None):
         """Sends an asynchronous single request.
-    
+
         Args:
             method (str): Remote function name.
             args (list): Positional args. Defaults to [].
             kwargs (dict): Named args. Defaults to {}.
-            queue (str, optional): Queue to send the request to. Defaults to None. 
+            queue (str, optional): Queue to send the request to. Defaults to None.
                 If None, selects the queue based on:
                 - Available queues for the method if client's `check_registry` is 'always' or 'cache'
                 - Client's `default_requests_queue` attribute otherwise.
             timeout (float, optional): Defaults to None (self.timeout).
                 If 0, check queue once.
-            
+
         Returns:
             result
 
@@ -477,7 +548,7 @@ class Client():
 
     def rpc_batch_async(self, requests_lst, queue=None, retry=False, ack=None):
         """Sends an asynchronous batch request that will be executed by a single worker.
-    
+
         Each individual request within the batch has is own id assigned.
 
         Args:
@@ -487,43 +558,43 @@ class Client():
                 use the default values for the `rpc_async` args that are not in the tuple.
             queue (str, optional): Queue to send the batch request to. Defaults to None.
                 If None, selects randomly one of the common queues available for all the methods
-                in `requests_lst`.  
+                in `requests_lst`.
             retry (bool): Include requests info in the AsyncResult objects in
                 order to make posible retrying every individual request. Defaults to False.
-            ack (bool, optional): True if the worker sends a ack message when the request is received. 
+            ack (bool, optional): True if the worker sends a ack message when the request is received.
                 False or None otherwise. Defaults to None.
 
         Returns:
             list: List of AsyncResult objects of the individual requests within the batch.
-        
+
         """
         ids = self.send_batch_request(requests_lst, queue=queue, retry=retry, ack=ack)
         return [AsyncResult(self, id) for id in ids]
 
     def rpc_batch_sync(self, requests_lst, timeout=None):
         """Sends a synchronous batch request that will be executed by a single worker.
-        
-        Waits for the results. 
+
+        Waits for the results.
         Uses safe_get, if there's an error in a function, returns None.
-        
+
         Args:
             requests_lst (list): List of tuples [(fname, args, kwargs), ...]
             timeout (float, optional): Defaults to None (self.timeout).
                 If 0, check queue once.
-            
+
         Returns:
             list: List of (results or None on error)
 
         Raises:
             TimeoutError
-        
+
         """
         fs = self.rpc_batch_async(requests_lst)
         return [f.safe_get(timeout=timeout) for f in fs]
-    
+
     def rpc_multi_async(self, requests_lst, retry=False, ack=None):
         """Sends multiple asynchronous requests that will be distributed among workers.
-        
+
         Args:
             requests_lst (list): List of tuples [(method, args, kwargs, queue), ...].
                 The tuples match the first four positional args of the `rpc_async`
@@ -533,17 +604,17 @@ class Client():
                 order to make posible retrying every individual request. Defaults to False.
             ack (bool, optional): True if the worker sends a ack message when the request is received. False or
                 None otherwise. Defaults to None.
-            
+
         Returns:
             list: List of AsyncResult objects.
-        
+
         """
         return [self.rpc_async(*t[:], retry=retry, ack=ack) for t in requests_lst]
 
     def rpc_multi_sync(self, requests_lst, timeout=None):
         """Sends multiple synchronous requests that will be distributed among workers.
-        
-        Waits for the results. 
+
+        Waits for the results.
         Uses safe_get, if there's an error in a function, returns None.
 
         Args:
@@ -553,25 +624,25 @@ class Client():
                 use the default values for the `rpc_async` args that are left out of the tuple.
             timeout (float, optional): Defaults to None (self.timeout).
                 If 0, check queue once.
-            
+
         Returns:
             list: List of (results or None on error).
 
         Raises:
             TimeoutError
-        
+
         """
         fs = self.rpc_multi_async(requests_lst, retry=False)
         return [f.safe_get(timeout=timeout) for f in fs]
 
     def rpc_async_fn(self, fn, args=[], kwargs={}, queue=None, retry=False, ack=None):
         """Sends an asynchronous single request with a local python function.
-    
+
         Args:
             fn (function): Local function to be serialized and sent.
             args (list): Positional args. Defaults to [].
             kwargs (dict): Named args. Defaults to {}.
-            queue (str, optional): Queue to send the request to. Defaults to None. 
+            queue (str, optional): Queue to send the request to. Defaults to None.
                 If None, selects the queue based on:
                 - Available queues for the method if client's `check_registry` is 'always' or 'cache'
                 - Client's `default_requests_queue` attribute otherwise.
@@ -579,10 +650,10 @@ class Client():
                 order to make posible retrying the request. Defaults to False.
             ack (bool, optional): True if the worker sends a ack message when the request is received. False or
                 None otherwise. Defaults to None.
-        
+
         Returns:
             AsyncResult:
-            
+
         Raises:
             TimeoutError
             RemoteException
@@ -596,24 +667,24 @@ class Client():
 
     def rpc_sync_fn(self, method, args=[], kwargs={}, queue=None, timeout=None):
         """Sends a synchronous single request with a local python function.
-    
+
         Args:
             fn (function): Local function to be serialized and sent.
             args (list): Positional args. Defaults to [].
             kwargs (dict): Named args. Defaults to {}.
-            queue (str, optional): Queue to send the request to. Defaults to None. 
+            queue (str, optional): Queue to send the request to. Defaults to None.
                 If None, selects the queue based on:
                 - Available queues for the method if client's `check_registry` is 'always' or 'cache'
                 - Client's `default_requests_queue` attribute otherwise.
             timeout (float, optional): Defaults to None (self.timeout).
                 If 0, check queue once.
-            
+
         Returns:
             result
 
         Raises:
             TimeoutError
             RemoteException
-        
+
         """
         return self.rpc_async_fn(method, args, kwargs, queue).get(timeout)

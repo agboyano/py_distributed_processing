@@ -1,14 +1,15 @@
-import random
 import logging
-import redis
+import random
 
+import redis
 
 logger = logging.getLogger(__name__)
 
 
 class RedisConnector(object):
-    def __init__(self, redis_host="localhost", redis_port=6379, redis_db=0, namespace="tasks"):
-
+    def __init__(
+        self, redis_host="localhost", redis_port=6379, redis_db=0, namespace="tasks"
+    ):
         self.connection = redis.Redis(redis_host, redis_port, redis_db)
         self.namespace = namespace
 
@@ -43,7 +44,9 @@ class RedisConnector(object):
         """
 
         registry = {}
-        for method_set in self.connection.scan_iter(f"{self.namespace}:method_queues:*"):
+        for method_set in self.connection.scan_iter(
+            f"{self.namespace}:method_queues:*"
+        ):
             method = method_set.decode("utf8").split(":")[-1]
             available = [x.decode("utf8") for x in self.connection.smembers(method_set)]
             registry[method] = available
@@ -94,7 +97,7 @@ class RedisConnector(object):
     def pop_multiple(self, queues, timeout=-1):
         """
         timeout: Maximum wait time in seconds (< 0 = wait indefinitely, 0 = try once)
-        Queues ordenadas por prioridad. 
+        Queues ordenadas por prioridad.
         Devuelve None si timeout, si no devuelve cola, valor.
         Lo usa el worker.
         """
@@ -107,7 +110,7 @@ class RedisConnector(object):
 
     def pop_all(self, queue):
         """
-        Extrae de la cola y devuelve todos los mensajes disponibles en la cola queue. 
+        Extrae de la cola y devuelve todos los mensajes disponibles en la cola queue.
         Lo usa el cliente
         """
 

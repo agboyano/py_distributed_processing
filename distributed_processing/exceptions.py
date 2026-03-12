@@ -1,6 +1,5 @@
 class RemoteException(Exception):
     def __init__(self, error):
-
         self.code = "00000"
         self.message = "Error no identificado"
         self.trace = ""
@@ -13,4 +12,4 @@ class RemoteException(Exception):
             self.trace = error["trace"]
 
     def __str__(self):
-        return f'Error {self.code} : {self.message}\n\n {self.trace}'
+        return f"Error {self.code} : {self.message}\n\n {self.trace}"

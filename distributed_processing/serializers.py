@@ -10,7 +10,8 @@ class JsonSerializer:
 
     def loads(self, json_str):
         return json.loads(json_str.decode("utf8"))
-    
+
+
 class DummySerializer:
     def dumps(self, obj):
         return obj
