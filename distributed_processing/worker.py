@@ -208,7 +208,7 @@ class Worker:
             if k in self.queues_to_register
         }
 
-        self.connector.register_methods(queues_to_register)
+        self.connector.register_methods(queues_to_register, self.worker_id)
 
     def get_reply_to_from_id(self, id):
         """Returns responses queue name from requests id.
@@ -293,7 +293,7 @@ class Worker:
 
     def error(self, code, request, dispatched_to=None, execution_start=None):
         id_ = request.get("id", None)
-        e = error_response(code, id=id_)
+        e = error_response(code, id=id_, with_trace=True)
         self.enhance_response(e, request, dispatched_to, execution_start)
         return e
 

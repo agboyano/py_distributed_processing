@@ -102,7 +102,7 @@ class FileSystemConnector(object):
 
         return registry
 
-    def register_methods(self, requests_queues_dict):
+    def register_methods(self, requests_queues_dict, worker_id):
         """Registers worker's public functions and their associated FIFO queues.
 
         Args:
@@ -141,6 +141,38 @@ class FileSystemConnector(object):
                 logger.info(
                     f"Method {method} published as available for queues: {colas}"
                 )
+            
+            for queue_name in requests_queues_dict:
+                queue_set = f"workers_queue_{queue_name}"
+                tmp = self.variables.get(queue_set, set())
+                self.variables[queue_set] = tmp.union(worker_id)
+
+
+    def _unregister_member_from_sets(self, prefix, member, settype ="Method", listeners="queues"):
+        deleted_variables = []
+        for s in [x for x in self.variables.keys() if prefix in x]:
+            tmp = self.variables[s].discard(member)
+            name = s.removeprefix(prefix)
+            if len(tmp) == 0:
+                del self.variables[s]
+                logger.info(
+                    f"{settype} {name} has not remaining public {listeners} listening. {member} unregistered."
+                )
+                deleted_variables.append(name)
+            else:
+               self.variables[s] = tmp
+        return deleted_variables
+
+    def unregister_methods(self, worker_id):
+        with fs_structs.structs.lock_context(
+            self.variables.base_path,
+            "registry_lock",
+            self.lock_registry_timeout,
+            self.lock_registry_watchdog_timeout,
+            self.lock_registry_wait,
+        ):
+            for queue_name in self._unregister_member_from_sets("workers_queue_", worker_id, "Queue", "workers"):
+                _ = self._unregister_member_from_sets("method_queues_", queue_name, "Method", "queues")
 
     def random_queue_for_method(self, method):
         available = self.all_queues_for_method(method)

@@ -53,7 +53,7 @@ class RedisConnector(object):
 
         return registry
 
-    def register_methods(self, requests_queues_dict):
+    def register_methods(self, requests_queues_dict, worker_id):
         """
         Lo usa el servidor para registrar los métodos.
         qrequests_queues_dict es un diccionario  con el nombre (corto) de las colas
@@ -72,6 +72,10 @@ class RedisConnector(object):
             self.connection.sadd(method_set, *registry[method])
             colas = ", ".join(str(q) for q in registry[method])
             logger.info(f"Method {method} published as available for queues: {colas}")
+        
+        for queue_name in requests_queues_dict:
+            queue_set = f"{self.namespace}:workers_queue:{queue_name}"
+            self.connection.sadd(queue_set, worker_id)
 
     def random_queue_for_method(self, method):
         available = self.all_queues_for_method(method)
