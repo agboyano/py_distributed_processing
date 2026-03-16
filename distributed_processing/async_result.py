@@ -168,20 +168,24 @@ class AsyncResult(object):
                 "AsyncResult.retry(): request info is None. Can not retry."
             )
         if self.pending():
+            if queue is None:
+                queue = self.queue
             method, args, kwargs = self.request
             new_id, new_queue = self._client.send_single_request(
-                method, args, kwargs, self.id, queue=queue
+                method, args, kwargs, queue=queue, id=self.id
             )
             logger.debug(
                 f"{timestamp()} Client: {self._client.client_id} Retrying request with id: {self.id} to queue: {new_queue}"
             )
-            self.queue = queue
+            self.queue = new_queue
             assert new_id == self.id
             self.retries += 1
+            return True
         else:
             logger.debug(
                 f"{timestamp()} Client: {self._client.client_id} Not Retrying: Response to Request with id: {self.id} already received."
             )
+            return False
 
 
 def gather(fs, timeout=None, step=5, max_dt=30):
