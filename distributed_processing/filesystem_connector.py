@@ -20,7 +20,7 @@ class FileSystemConnector(object):
         self, base_path, temp_dir=None, serializer=fs_structs.structs.joblib_serializer
     ):
         self.namespace = fs_structs.structs.FSNamespace(base_path, temp_dir, serializer)
-        self.variables = self.namespace.udict("variables")
+        self.registry = self.namespace.udict("registry")
         self.with_watchdog = True
 
         self.pop_sleep = (5, 10)  # sólo si with_watchdog es False
@@ -42,7 +42,7 @@ class FileSystemConnector(object):
     def clean_namespace(self):
         "Borra todos los objetos vinculados al namespace"
         self.namespace.clear()
-        self.variables = self.namespace.udict("variables")
+        self.registry = self.namespace.udict("registry")
 
     def get_requests_queue(self, queue_name):
         return f"requests_{queue_name}"
@@ -55,26 +55,26 @@ class FileSystemConnector(object):
 
     def get_client_id(self):
         with fs_structs.structs.lock_context(
-            self.variables.base_path,
+            self.registry.base_path,
             "nclients_lock",
             self.lock_registry_timeout,
             self.lock_registry_watchdog_timeout,
             self.lock_registry_wait,
         ):
-            nclients = self.variables.get("nclients", 0) + 1
-            self.variables["nclients"] = nclients
+            nclients = self.registry.get("nclients", 0) + 1
+            self.registry["nclients"] = nclients
         return f"fs_client_{nclients}"
 
     def get_server_id(self):
         with fs_structs.structs.lock_context(
-            self.variables.base_path,
+            self.registry.base_path,
             "nservers_lock",
             self.lock_registry_timeout,
             self.lock_registry_watchdog_timeout,
             self.lock_registry_wait,
         ):
-            nservers = self.variables.get("nservers", 0) + 1
-            self.variables["nservers"] = nservers
+            nservers = self.registry.get("nservers", 0) + 1
+            self.registry["nservers"] = nservers
         return f"fs_server_{nservers}"
 
     def methods_registry(self):
@@ -87,17 +87,17 @@ class FileSystemConnector(object):
         registry = {}
 
         with fs_structs.structs.lock_context(
-            self.variables.base_path,
+            self.registry.base_path,
             "registry_lock",
             self.lock_registry_timeout,
             self.lock_registry_watchdog_timeout,
             self.lock_registry_wait,
         ):
-            method_queues = [x for x in self.variables.keys() if "method_queues_" in x]
+            method_queues = [x for x in self.registry.keys() if "method_queues_" in x]
 
             for method_set in method_queues:
                 method = method_set.replace("method_queues_", "")
-                available = [x for x in self.variables[method_set]]
+                available = [x for x in self.registry[method_set]]
                 registry[method] = available
 
         return registry
@@ -127,7 +127,7 @@ class FileSystemConnector(object):
                 registry[method] = registry.get(method, []) + [queue_name]
 
         with fs_structs.structs.lock_context(
-            self.variables.base_path,
+            self.registry.base_path,
             "registry_lock",
             self.lock_registry_timeout,
             self.lock_registry_watchdog_timeout,
@@ -135,8 +135,8 @@ class FileSystemConnector(object):
         ):
             for method in registry:
                 method_set = f"method_queues_{method}"
-                tmp = self.variables.get(method_set, set())
-                self.variables[method_set] = tmp.union(registry[method])
+                tmp = self.registry.get(method_set, set())
+                self.registry[method_set] = tmp.union(registry[method])
                 colas = ", ".join(str(q) for q in registry[method])
                 logger.info(
                     f"Method {method} published as available for queues: {colas}"
@@ -144,28 +144,28 @@ class FileSystemConnector(object):
             
             for queue_name in requests_queues_dict:
                 queue_set = f"workers_queue_{queue_name}"
-                tmp = self.variables.get(queue_set, set())
-                self.variables[queue_set] = tmp.union(worker_id)
+                tmp = self.registry.get(queue_set, set())
+                self.registry[queue_set] = tmp.union(worker_id)
 
 
     def _unregister_member_from_sets(self, prefix, member, settype ="Method", listeners="queues"):
         deleted_variables = []
-        for s in [x for x in self.variables.keys() if prefix in x]:
-            tmp = self.variables[s].discard(member)
+        for s in [x for x in self.registry.keys() if prefix in x]:
+            tmp = self.registry[s].discard(member)
             name = s.removeprefix(prefix)
             if len(tmp) == 0:
-                del self.variables[s]
+                del self.registry[s]
                 logger.info(
                     f"{settype} {name} has not remaining public {listeners} listening. {member} unregistered."
                 )
                 deleted_variables.append(name)
             else:
-               self.variables[s] = tmp
+               self.registry[s] = tmp
         return deleted_variables
 
     def unregister_methods(self, worker_id):
         with fs_structs.structs.lock_context(
-            self.variables.base_path,
+            self.registry.base_path,
             "registry_lock",
             self.lock_registry_timeout,
             self.lock_registry_watchdog_timeout,
@@ -182,7 +182,7 @@ class FileSystemConnector(object):
 
     def all_queues_for_method(self, method):
         method_set = f"method_queues_{method}"
-        return [x for x in self.variables[method_set]]
+        return [x for x in self.registry[method_set]]
 
     def enqueue(self, queue_name, msg):
         queue = self.namespace.list(queue_name)
