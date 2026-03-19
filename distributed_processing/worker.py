@@ -209,6 +209,15 @@ class Worker:
         }
 
         self.connector.register_methods(queues_to_register, self.worker_id)
+    
+    def unregister(self):
+        logger.debug(
+                f"{timestamp()} Worker: {self.worker_id} unregistering."
+            )
+        self.connector.unregister_methods(self.worker_id)
+
+    def __del__(self):
+        self.unregister()
 
     def get_reply_to_from_id(self, id):
         """Returns responses queue name from requests id.
