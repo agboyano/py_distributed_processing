@@ -7,21 +7,19 @@ from distributed_processing.async_result import gather
 
 import fs_structs
 
+import time
+
+from dotenv import load_dotenv
+from os import getenv
 
 # %%
-CURRO = True
-
-if CURRO:
-    NS_PATH ="G:\\fs_namespaces\\prueba_distribuida_multi"
-    NS_PATH ="C:\\fs_namespaces\\prueba_distribuida_multi"
-
-else:
-    NS_PATH = "/home/augusto/python/notebooks/fs_namespaces/prueba_distribuida_multi"
+load_dotenv()
+NS_PATH=getenv("NS_PATH")
 
 
 # %%
 import logging
-logging.getLogger("distributed_processing").setLevel(logging.DEBUG)
+#logging.getLogger("distributed_processing").setLevel(logging.DEBUG)
 #logging.getLogger("distributed_processing.filesystem_connector").setLevel(logging.DEBUG)
 
 # %%
@@ -58,10 +56,11 @@ client.rpc_sync("list_processes", [])
 client.rpc_sync("kill_process", [z2])
 
 # %%
-client.rpc_sync("list_processes", [])
+print(client.rpc_sync("list_processes", []))
 
 # %%
-asdasdasdasd
+time.sleep(5)
+print("**************************************")
 
 # %%
 y = client.rpc_async("add", [1, 0])
@@ -133,7 +132,6 @@ N = 10
 for i in range(N):
     fn = random.choice(("add", "mul", "div", "lista", "tupla", "dic"))
     t = (fn, [random.random(),random.random()], {})
-    print(t)
     tp.append(t)
     fs.append(client.rpc_async(t[0], t[1]))
 
@@ -203,7 +201,6 @@ N = 10
 for i in range(N):
     fn = random.choice(("add", "mul", "div", "fake"))
     t = (fn, [random.random(),random.random()], {})
-    print(t)
     tp.append(t)
 
 # %%

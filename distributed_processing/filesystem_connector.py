@@ -145,13 +145,14 @@ class FileSystemConnector(object):
             for queue_name in requests_queues_dict:
                 queue_set = f"workers_queue_{queue_name}"
                 tmp = self.registry.get(queue_set, set())
-                self.registry[queue_set] = tmp.union(worker_id)
+                self.registry[queue_set] = tmp.union({worker_id})
 
 
     def _unregister_member_from_sets(self, prefix, member, settype ="Method", listeners="queues"):
         deleted_variables = []
         for s in [x for x in self.registry.keys() if prefix in x]:
-            tmp = self.registry[s].discard(member)
+            tmp = self.registry[s]
+            tmp.discard(member)
             name = s.removeprefix(prefix)
             if len(tmp) == 0:
                 del self.registry[s]
