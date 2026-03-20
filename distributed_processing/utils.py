@@ -9,7 +9,7 @@ from .filesystem_connector import FileSystemConnector
 from .serializers import DummySerializer
 from .worker import Worker
 
-dill.settings["recurse"] = True # importante
+dill.settings["recurse"] = True  # importante
 
 
 def fsclient(
@@ -30,8 +30,16 @@ def fsworker(NS_PATH, clean=False, with_watchdog=True, worker_id=None):
     return Worker(DummySerializer(), fs_connector, worker_id=worker_id)
 
 
+def serialize(x):
+    return dill.dumps(x)
+
+
+def deserialize(x):
+    return dill.loads(x)
+
+
 def _create_worker(serialized_worker_constructor, worker_id, id, shared_dict):
-    worker_constructor = dill.loads(serialized_worker_constructor)
+    worker_constructor = deserialize(serialized_worker_constructor)
     worker = worker_constructor(worker_id)
     shared_dict[id] = worker.worker_id
     worker.run()
@@ -83,7 +91,7 @@ def fsnode(
     def create_process(worker_type, worker_id=None):
         id = uuid.uuid4()
         worker_constructor = workers_constructors[worker_type]
-        serialized_worker_constructor = dill.dumps(worker_constructor)
+        serialized_worker_constructor = serialize(worker_constructor)
 
         p = mp.Process(
             target=_create_worker,

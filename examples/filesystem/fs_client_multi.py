@@ -1,26 +1,24 @@
 # %%
 import random
-
-from distributed_processing.utils import fsclient
-
-from distributed_processing.async_result import gather
+import time
+from os import getenv
 
 import fs_structs
-
-import time
-
 from dotenv import load_dotenv
-from os import getenv
+
+from distributed_processing.async_result import gather
+from distributed_processing.utils import fsclient
 
 # %%
 load_dotenv()
-NS_PATH=getenv("NS_PATH")
+NS_PATH = getenv("NS_PATH")
 
 
 # %%
 import logging
-#logging.getLogger("distributed_processing").setLevel(logging.DEBUG)
-#logging.getLogger("distributed_processing.filesystem_connector").setLevel(logging.DEBUG)
+
+# logging.getLogger("distributed_processing").setLevel(logging.DEBUG)
+# logging.getLogger("distributed_processing.filesystem_connector").setLevel(logging.DEBUG)
 
 # %%
 """
@@ -69,7 +67,7 @@ y = client.rpc_async("add", [1, 0])
 y.get()
 
 # %%
-client.check_registry ="always"
+client.check_registry = "always"
 
 try:
     y = client.rpc_async("fake", [1, 0])
@@ -77,7 +75,7 @@ except Exception as e:
     print(e)
 
 # %%
-client.check_registry ="never" # use queue client.default_queue, by default "default"
+client.check_registry = "never"  # use queue client.default_queue, by default "default"
 client.set_default_queue("cola_1")
 
 y = client.rpc_async("fake", [1, 0])
@@ -89,7 +87,7 @@ except Exception as e:
 
 
 # %%
-client.check_registry ="never"
+client.check_registry = "never"
 client.set_default_queue("cola_1")
 
 y = client.rpc_async("fake", [1, 0])
@@ -97,7 +95,7 @@ y = client.rpc_async("fake", [1, 0])
 y.safe_get(default="Esto es un error")
 
 # %%
-client.check_registry ="cache"
+client.check_registry = "cache"
 
 # %%
 x = client.rpc_async("div", [1, 0])
@@ -109,13 +107,16 @@ except Exception as e:
     print(e)
 
 # %%
-#x = client.rpc_sync("div", [1, 0])
+# x = client.rpc_sync("div", [1, 0])
 
 # %%
 client.rpc_sync("add", [1, 1])
 
+
 # %%
-def f(x,y): return x + y
+def f(x, y):
+    return x + y
+
 
 y = client.rpc_async_fn(f, [1, 2.0])
 
@@ -126,19 +127,18 @@ y.get()
 client.rpc_sync_fn(f, [3.0, 2.0])
 
 # %%
-fs =[]
+fs = []
 tp = []
 N = 10
 for i in range(N):
     fn = random.choice(("add", "mul", "div", "lista", "tupla", "dic"))
-    t = (fn, [random.random(),random.random()], {})
+    t = (fn, [random.random(), random.random()], {})
     tp.append(t)
     fs.append(client.rpc_async(t[0], t[1]))
 
 t = ("sleep", [10], {})
 tp.append(t)
 fs.append(client.rpc_async(t[0], t[1]))
-
 
 
 # %%
@@ -150,8 +150,8 @@ fs = client.rpc_multi_async(tp)
 
 # %%
 # AsynResult.status updates the information every time it is called.
-# 'PENDING' state should be assumed as transitory. 
-# If there are responses available in the queue or in the cache 
+# 'PENDING' state should be assumed as transitory.
+# If there are responses available in the queue or in the cache
 # status or pending() updates the AsyncResult object.
 
 [f.status for f in fs]
@@ -195,19 +195,19 @@ fs = client.rpc_batch_async(tp)
 client.rpc_batch_sync(tp)
 
 # %%
-fs =[]
+fs = []
 tp = []
 N = 10
 for i in range(N):
     fn = random.choice(("add", "mul", "div", "fake"))
-    t = (fn, [random.random(),random.random()], {})
+    t = (fn, [random.random(), random.random()], {})
     tp.append(t)
 
 # %%
 tp
 
 # %%
-client.check_registry ="never"
+client.check_registry = "never"
 client.set_default_queue("cola_1")
 
 fs = client.rpc_batch_async(tp)
@@ -219,7 +219,7 @@ fs = client.rpc_batch_async(tp)
 client.responses
 
 # %%
-client.check_registry ="cache"
+client.check_registry = "cache"
 
 # %%
 try:
@@ -228,13 +228,13 @@ except Exception as e:
     print(e)
 
 # %%
-try:    
+try:
     x = client.rpc_batch_sync(tp, timeout=5)
 except Exception as e:
     print(e)
 
 # %%
-client.check_registry="never"
+client.check_registry = "never"
 client.set_default_queue("cola_1")
 
 x = client.rpc_async("kk", [1, 0])
@@ -251,10 +251,15 @@ y = client.rpc_async("add", [1, 0])
 # %%
 y.get(5)
 
-# %%
-def f(x,y): return x + y
 
-client.check_registry = "never" # "never" use queue "default" don't work for rpc_async_fn or rpc_sync_fn 
+# %%
+def f(x, y):
+    return x + y
+
+
+client.check_registry = (
+    "never"  # "never" use queue "default" don't work for rpc_async_fn or rpc_sync_fn
+)
 y = client.rpc_async_fn(f, [1, 2.0])
 try:
     print(y.get())
@@ -284,7 +289,7 @@ resultados
 client.rpc_sync_fn(print, ["hola"])
 
 # %%
-fs =[]
+fs = []
 tp = []
 N = 10
 for i in range(N):
@@ -294,15 +299,16 @@ for i in range(N):
     tp.append(t)
 
 # %%
-client.check_registry="never"
+client.check_registry = "never"
 fs = client.rpc_multi_async(tp, retry=True)
 
 # %%
 from time import time
 
+
 def gather_kk(arl, timeout=None, step=5, max_dts=0):
     # Update to reset delta times
-    pending_ars = [ar for ar in arl if not(ar.ok() or ar.failed())] 
+    pending_ars = [ar for ar in arl if not (ar.ok() or ar.failed())]
     pending_ids = [ar.id for ar in pending_ars]
     if fs[0]._client.wait_responses(pending_ids, timeout=0) == []:
         return
@@ -315,34 +321,42 @@ def gather_kk(arl, timeout=None, step=5, max_dts=0):
 
     i = 0
     # ok() and failed() don't update.
-    # pending() updates, every time is called, all the ids 
-    # that have a response available in the queue 
-    pending_ars = [ar for ar in arl if not(ar.ok() or ar.failed())]
-    pending_ars0= pending_ars
+    # pending() updates, every time is called, all the ids
+    # that have a response available in the queue
+    pending_ars = [ar for ar in arl if not (ar.ok() or ar.failed())]
+    pending_ars0 = pending_ars
     pending_ids = [ar.id for ar in pending_ars]
     t_prev = time()
     n_pending_prev = len(pending_ars)
-    n_pending_0 = n_pending_prev    
+    n_pending_0 = n_pending_prev
     while (time() - t_0) <= timeout:
         try:
             if fs[0]._client.wait_responses(pending_ids, timeout=5) == []:
                 return
         except TimeoutError:
             pass
-        dts = [ar.finished_time - t_0 for ar in pending_ars0 if (ar.ok() or ar.failed())]
-        if len(dts)>0:
-            #max_dts = max(max_dts, max(dts))
-            max_dts = max(dts)    
-        pending_ars = [ar for ar in arl if not(ar.ok() or ar.failed())] 
+        dts = [
+            ar.finished_time - t_0 for ar in pending_ars0 if (ar.ok() or ar.failed())
+        ]
+        if len(dts) > 0:
+            # max_dts = max(max_dts, max(dts))
+            max_dts = max(dts)
+        pending_ars = [ar for ar in arl if not (ar.ok() or ar.failed())]
         pending_ids = [ar.id for ar in pending_ars]
         if len(pending_ars) < n_pending_prev:
             t_prev = time()
-            n_pending_prev = len(pending_ars)  
+            n_pending_prev = len(pending_ars)
 
-        avg =  (time()-t_0)/(n_pending_0 -len(pending_ars)) if (n_pending_0 -len(pending_ars))>0 else 0
+        avg = (
+            (time() - t_0) / (n_pending_0 - len(pending_ars))
+            if (n_pending_0 - len(pending_ars)) > 0
+            else 0
+        )
 
-        print(f"{i}: seconds {time()-t_0}s, AR recovered {N-len(pending_ars)}, \
-                AR left {len(pending_ars)}, max delta {max_dts}, avg {avg}")
+        print(
+            f"{i}: seconds {time() - t_0}s, AR recovered {N - len(pending_ars)}, \
+                AR left {len(pending_ars)}, max delta {max_dts}, avg {avg}"
+        )
         i += 0
 
 
@@ -353,7 +367,7 @@ gather(fs, 30, 5)
 [f.status for f in fs]
 
 # %%
-[(time() if f.finished_time is None else f.finished_time) -f.creation_time for f in fs]
+[(time() if f.finished_time is None else f.finished_time) - f.creation_time for f in fs]
 
 # %%
 [f.finished_time for f in fs]
@@ -373,7 +387,7 @@ fs[4].retry()
 [f.retry() for f in fs]
 
 # %%
-client.check_registry="always"
+client.check_registry = "always"
 client.all_queues_for_method("info")
 
 # %%
@@ -383,21 +397,22 @@ client.connector.all_queues_for_method("info")
 client.update_registry_cache()
 
 # %%
-client.check_registry="Never"
+client.check_registry = "Never"
 client.all_queues_for_method("hola")
 
 # %%
-client.check_registry="always"
+client.check_registry = "always"
 a = client.rpc_async("info")
 
 # %%
-client.rpc_sync("div", [2,1], timeout=10)
+client.rpc_sync("div", [2, 1], timeout=10)
 
 # %%
 x = a.get()
 
 # %%
 client.registry
+
 
 # %%
 def registry_one_step(x):
@@ -409,7 +424,8 @@ def registry_one_step(x):
                 registry[method].append(queue)
             else:
                 registry[method] = [queue]
-    return registry 
+    return registry
+
 
 def queues_workers_one_step(x):
     worker_id = x[0]
@@ -419,7 +435,8 @@ def queues_workers_one_step(x):
             registry[queue].append(worker_id)
         else:
             registry[queue] = [worker_id]
-    return registry 
+    return registry
+
 
 def all_workers_for_queue():
     # all requests queues for "info" method
@@ -433,7 +450,7 @@ def all_workers_for_queue():
             x = client.rpc_sync("info", timeout=10)
         except TimeoutError:
             x = None
-        
+
         if x is not None:
             for method, qs in registry_one_step(x).items():
                 if method not in rr:
@@ -446,7 +463,7 @@ def all_workers_for_queue():
                 else:
                     qq[q] += ws
     return rr, qq
-            
+
 
 # %%
 registry_one_step(x)
@@ -464,7 +481,7 @@ r
 q
 
 # %%
-t = (1,2,3,4)
+t = (1, 2, 3, 4)
 
 # %%
 t[:6]
@@ -473,6 +490,3 @@ t[:6]
 t[:5]
 
 # %%
-
-
-
