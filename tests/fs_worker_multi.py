@@ -4,7 +4,7 @@ from time import sleep
 
 from dotenv import load_dotenv
 
-from distributed_processing.utils import fsnode, fsworker, serialize
+from distributed_processing.utils import fsnode, fsworker
 
 
 def worker1(worker_id):
@@ -60,7 +60,7 @@ def worker1(worker_id):
 
 
 if __name__ == "__main__":
-    logging.getLogger("distributed_processing").setLevel(logging.DEBUG)
+    #logging.getLogger("distributed_processing").setLevel(logging.DEBUG)
     load_dotenv()
     NS_PATH = getenv("NS_PATH")
     workers_constructors = {"worker1": worker1}
