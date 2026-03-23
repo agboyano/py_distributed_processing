@@ -81,6 +81,9 @@ class Client:
     def set_default_queue(self, queue):
         self.default_requests_queue = self.connector.get_requests_queue(queue)
 
+    def to_requests_queue(self, queue_name):
+        return self.connector.get_requests_queue(queue_name)
+
     def generate_id(self):
         self.last_request_idnumber += 1
         self.last_request_id = f"{self.client_id}:{str(self.last_request_idnumber)}"

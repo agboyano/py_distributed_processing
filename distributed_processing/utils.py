@@ -13,6 +13,10 @@ from .worker import Worker
 
 dill.settings["recurse"] = True  # importante
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 
 def fsclient(
     NS_PATH, check_registry="Cache", with_watchdog=True, pop_watchdog_timeout=10
@@ -67,10 +71,13 @@ def fsnode(
 
     def _kill_process(wp):
         if wp.p.is_alive():
+            #logger.info(f"Cleaning and unregistering process {wp.pid} with worker_id {wp.worker_id} of type {wp.worker_type} for {master.worker_id}.")
             wp.p.terminate()  # Send SIGTERM
-            wp.p.join(timeout=1)
+            wp.p.join(timeout=30)  # Better terminate.
             if wp.p.is_alive():
                 wp.p.kill()  # Force kill
+                #logger.info(f"Killing process {wp.pid}.")
+            sleep(1)
             master.connector.unregister_methods(wp.worker_id)
             return True
         return False
@@ -84,6 +91,16 @@ def fsnode(
 
     def kill_processes(pids):
         return [kill_process(pid) for pid in pids]
+    
+    def kill_all_processes():
+        kp = []
+        for wp in processes:
+            try:
+                kp.append(_kill_process(wp))
+                sleep(1)
+            except:
+                kp.append(None)
+        return kp
 
     def create_process(worker_type, worker_id=None):
         id = uuid.uuid4()
@@ -94,7 +111,7 @@ def fsnode(
             target=_create_worker,
             args=[serialized_worker_constructor, worker_id, id, active_workers],
         )
-        p.daemon = True  # will die when parent dies
+        p.daemon = False  # will die when parent dies
         p.start()
         while id not in active_workers:
             sleep(0.1)
@@ -103,31 +120,22 @@ def fsnode(
         return p.pid
 
     def cleanup():
-        master_id = master.worker_id
-        kp = []
-        print(f"Cleaning and unregistering processes for {master_id}")
-        for wp in processes:
-            print(
-                f"Cleaning and unregistering process {wp.pid} with worker {wp.worker_id} \
-                  of type {wp.worker_type} for {master_id}"
-            )
-            kp.append(_kill_process(wp))
-        print(f"Unregistering {master_id}")
+        kp = kill_all_processes()
         master.unregister()
-        return kp
-
-    atexit.register(cleanup)
+        return kp 
 
     master_funcs = {
         "create_worker": create_process,
         "list_processes": list_processes,
         "kill_process": kill_process,
         "kill_processes": kill_processes,
+        "kill_all_processes": kill_all_processes,
         "cleanup": cleanup,
     }
 
     master = fsworker(NS_PATH, clean=clean, worker_id=worker_id)
     master.add_requests_queue(master.worker_id, master_funcs)
     master.update_methods_registry()
+    atexit.register(cleanup)
 
     return master

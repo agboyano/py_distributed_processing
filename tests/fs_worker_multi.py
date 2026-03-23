@@ -63,11 +63,12 @@ if __name__ == "__main__":
     #logging.getLogger("distributed_processing").setLevel(logging.DEBUG)
     load_dotenv()
     NS_PATH = getenv("NS_PATH")
+    MASTER_QUEUE = getenv("MASTER_QUEUE")
     workers_constructors = {"worker1": worker1}
     master = fsnode(
         NS_PATH,
         clean=True,
-        worker_id="node_1",
+        worker_id=MASTER_QUEUE,
         workers_constructors=workers_constructors,
     )
     
