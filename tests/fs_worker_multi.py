@@ -70,4 +70,6 @@ if __name__ == "__main__":
         worker_id="node_1",
         workers_constructors=workers_constructors,
     )
+    
     master.run()
+
