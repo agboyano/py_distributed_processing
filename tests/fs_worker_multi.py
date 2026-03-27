@@ -85,5 +85,8 @@ if __name__ == "__main__":
         workers_constructors=workers_constructors,
     )
     
+    for i in range(3):
+        master.exec_method("create_worker", ["worker1"], queue=MASTER_QUEUE)
+    
     master.run()
 
