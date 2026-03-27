@@ -71,16 +71,17 @@ def fsnode(
 
     def _kill_process(wp):
         if wp.p.is_alive():
+            killed = False
             #logger.info(f"Cleaning and unregistering process {wp.pid} with worker_id {wp.worker_id} of type {wp.worker_type} for {master.worker_id}.")
             wp.p.terminate()  # Send SIGTERM
             wp.p.join(timeout=30)  # Better terminate.
             if wp.p.is_alive():
                 wp.p.kill()  # Force kill
+                killed = True
                 #logger.info(f"Killing process {wp.pid}.")
-            sleep(1)
             master.connector.unregister_methods(wp.worker_id)
-            return True
-        return False
+            return True, killed
+        return False, False
 
     def kill_process(pid):
         wps = [wp for wp in processes if wp.p.is_alive() and wp.pid == pid]
@@ -117,7 +118,7 @@ def fsnode(
             sleep(0.1)
         wp = WorkerProcess(p, p.pid, worker_type, active_workers.get(id, "error"))
         processes.append(wp)
-        return p.pid
+        return p.pid, worker_type, wp.worker_id
 
     def cleanup():
         kp = kill_all_processes()
