@@ -21,6 +21,9 @@ class RedisConnector(object):
     def get_requests_queue(self, queue_name):
         return f"{self.namespace}:requests:{queue_name}"
 
+    def requests_queue_name(self, queue_ref):
+        return queue_ref.split(":")[-1]
+
     def get_client_id(self):
         nclients = str(self.connection.incr(f"{self.namespace}:nclients", 1))
         return f"{self.namespace}:redis_client:{nclients}"
@@ -39,7 +42,7 @@ class RedisConnector(object):
         """
         Lo usa el cliente.
         Cada método tiene un set de redis con clave {namespace}:method_queues:{method}.
-        El contenido del set son los nombres de las colas donde se puden enviar
+        El contenido del set son los nombres de las colas donde se pueden enviar
         los request para elecutar ese método.
         """
 
@@ -53,10 +56,26 @@ class RedisConnector(object):
 
         return registry
 
+    def workers_registry(self):
+        """
+        Lo usa el cliente.
+        Cada cola tiene un set de redis con clave {namespace}:workers_queue:{queue}.
+        El contenido del set son los nombres de las workers que están escuchando en esa cola.
+        """
+        registry = {}
+        for method_set in self.connection.scan_iter(
+            f"{self.namespace}:workers_queue:*"
+        ):
+            method = method_set.decode("utf8").split(":")[-1]
+            available = [x.decode("utf8") for x in self.connection.smembers(method_set)]
+            registry[method] = available
+
+        return registry
+
     def register_methods(self, requests_queues_dict, worker_id):
         """
         Lo usa el servidor para registrar los métodos.
-        qrequests_queues_dict es un diccionario  con el nombre (corto) de las colas
+        requests_queues_dict es un diccionario  con el nombre (corto) de las colas
         de clave y un diccionario con los nombres de las funciones de claves y la función de valor
         """
         registry = {}

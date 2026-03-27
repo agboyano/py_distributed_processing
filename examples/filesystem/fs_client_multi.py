@@ -388,7 +388,7 @@ fs[4].retry()
 
 # %%
 client.check_registry = "always"
-client.all_queues_for_method("info")
+client._all_queue_refs_for_method("info")
 
 # %%
 client.connector.all_queues_for_method("info")
@@ -398,7 +398,7 @@ client.update_registry_cache()
 
 # %%
 client.check_registry = "Never"
-client.all_queues_for_method("hola")
+client._all_queue_refs_for_method("hola")
 
 # %%
 client.check_registry = "always"
@@ -411,7 +411,7 @@ client.rpc_sync("div", [2, 1], timeout=10)
 x = a.get()
 
 # %%
-client.registry
+client._registry
 
 
 # %%

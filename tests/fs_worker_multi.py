@@ -16,7 +16,9 @@ def worker1(worker_id):
             rq[k] = set(v[0].keys())
         return server.worker_id, rq
 
-    server.add_requests_queue(server.worker_id, {"info": info})
+    func_dict0 = {"info": info}
+
+    server.add_requests_queue("cola_0", func_dict0)
 
     def add(x, y):
         return x + y
@@ -54,6 +56,17 @@ def worker1(worker_id):
     func_dict2 = {"hola": hola}
 
     server.add_requests_queue("cola_2", func_dict2)
+
+    # Truco
+    # Añado una cola que proporciona todas las funciones anteriores.
+    # La llamo como el worker y le doy prioridad 100.
+    # NO LA PUBLICO.
+    # La utilizo para hacer llamadas directas al worker, saltándome las colas. 
+    server.add_requests_queue(server.worker_id, dict(func_dict0, **func_dict1, **func_dict2), 100, False)
+    # añado también el método eval_py_function a la cola anterior
+    server.add_python_eval(server.worker_id)
+
+    # creo cola "py_eval" con método eval_py_function
     server.add_python_eval()
     server.update_methods_registry()
     return server

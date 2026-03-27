@@ -46,6 +46,9 @@ class FileSystemConnector(object):
 
     def get_requests_queue(self, queue_name):
         return f"requests_{queue_name}"
+    
+    def requests_queue_name(self, queue_ref):
+        return queue_ref.removeprefix("requests_")
 
     def get_responses_queue(self, client_id):
         return f"{client_id}_responses"
@@ -80,9 +83,6 @@ class FileSystemConnector(object):
     def methods_registry(self):
         """
         Lo usa el cliente.
-        Cada método tiene un set de redis con clave {namespace}:method_queues:{method}.
-        El contenido del set son los nombres de las colas donde se pueden enviar
-        los request para ejecutar ese método.
         """
         registry = {}
 
@@ -99,6 +99,28 @@ class FileSystemConnector(object):
                 method = method_set.replace("method_queues_", "")
                 available = [x for x in self.registry[method_set]]
                 registry[method] = available
+
+        return registry
+
+    def workers_registry(self):
+        """
+        Lo usa el cliente.
+        """
+        registry = {}
+
+        with fs_structs.structs.lock_context(
+            self.registry.base_path,
+            "registry_lock",
+            self.lock_registry_timeout,
+            self.lock_registry_watchdog_timeout,
+            self.lock_registry_wait,
+        ):
+            workers_queues = [x for x in self.registry.keys() if "workers_queue_" in x]
+
+            for worker_queues in workers_queues:
+                worker = worker_queues.replace("workers_queue_", "")
+                available = [x for x in self.registry[worker_queues]]
+                registry[worker] = available
 
         return registry
 
