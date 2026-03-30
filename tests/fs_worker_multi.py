@@ -6,6 +6,8 @@ from dotenv import load_dotenv
 
 from distributed_processing.utils import fsnode, fsworker
 
+logging.getLogger("distributed_processing").setLevel(logging.DEBUG)
+logging.getLogger("fs_structs").setLevel(logging.DEBUG)
 
 def worker1(worker_id):
     server = fsworker(NS_PATH, clean=False, worker_id=worker_id)
@@ -73,7 +75,7 @@ def worker1(worker_id):
 
 
 if __name__ == "__main__":
-    #logging.getLogger("distributed_processing").setLevel(logging.DEBUG)
+    logging.getLogger("distributed_processing").setLevel(logging.DEBUG)
     load_dotenv()
     NS_PATH = getenv("NS_PATH")
     MASTER_QUEUE = getenv("MASTER_QUEUE")

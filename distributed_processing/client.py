@@ -559,7 +559,7 @@ class Client:
             AsyncResult
         """
         request = (method, args, kwargs) if retry else None
-        id, queue = self.send_single_request(method, args, kwargs, queue=queue)
+        id, queue = self.send_single_request(method, args, kwargs, queue=queue, ack=ack)
         return AsyncResult(self, id, request, queue)
 
     def rpc_sync(self, method, args=[], kwargs={}, queue=None, timeout=None):
