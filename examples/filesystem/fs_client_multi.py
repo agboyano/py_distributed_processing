@@ -388,11 +388,7 @@ fs[4].retry()
 
 # %%
 client.check_registry = "always"
-<<<<<<< HEAD
-client.all_queues_for_method("info")
-=======
 client._all_queue_refs_for_method("info")
->>>>>>> wip
 
 # %%
 client.connector.all_queues_for_method("info")
@@ -402,11 +398,7 @@ client.update_registry_cache()
 
 # %%
 client.check_registry = "Never"
-<<<<<<< HEAD
-client.all_queues_for_method("hola")
-=======
 client._all_queue_refs_for_method("hola")
->>>>>>> wip
 
 # %%
 client.check_registry = "always"
