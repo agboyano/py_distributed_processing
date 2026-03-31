@@ -55,7 +55,7 @@ class Client:
         self.responses_used = set()
 
         self.check_registry = check_registry
-        self.registry = {}
+        self._registry = {}
 
         if check_registry == "cache":
             self.update_registry_cache()
@@ -79,7 +79,13 @@ class Client:
         self.timeout = timeout
 
     def set_default_queue(self, queue):
-        self.default_requests_queue = self.connector.get_requests_queue(queue)
+        self.default_queue_ref = self.connector.get_requests_queue(queue)
+
+    def to_requests_queue_ref(self, queue_name):
+        return self.connector.get_requests_queue(queue_name)
+    
+    def simple_queue_name(self, queue_ref):
+        return self.connector.requests_queue_name(queue_ref)
 
     def generate_id(self):
         self.last_request_idnumber += 1
@@ -87,9 +93,53 @@ class Client:
         return self.last_request_id
 
     def update_registry_cache(self):
-        self.registry = self.connector.methods_registry()
+        self._registry["methods"] = self.connector.methods_registry()
+        self._registry["workers"] = self.connector.workers_registry()
 
-    def select_queue(self, method):
+    def registry(self, update=False):
+        registry = {}
+        if update:
+            self.update_registry_cache()
+
+        if "methods" in self._registry:
+            registry["methods"] = {}
+            for method in self._registry["methods"]:
+                registry["methods"][method] = [self.simple_queue_name(x) for x in self._registry["methods"][method]]
+
+        if "workers" in self._registry:
+            registry["workers"] = {}
+            for queue_ref in self._registry["workers"]:
+                registry["workers"][self.simple_queue_name(queue_ref)] = self._registry["workers"][queue_ref]
+        
+        return registry
+
+    def _all_queue_refs_for_method(self, method):
+        if self.check_registry == "always":
+            return self.connector.all_queues_for_method(method)
+        elif self.check_registry == "cache":
+            if method not in self._registry["methods"]:
+                return []
+            return self._registry["methods"][method]
+        else:
+            return [self.default_queue_ref]
+
+    def all_queues_for_method(self, method, update=False):
+        if update and self.check_registry=="cache":
+            self.update_registry_cache()
+        return [self.simple_queue_name(x) for x in self._all_queue_refs_for_method(method)]
+    
+    def all_workers_for_method(self, method, update=False):
+        if update or self.check_registry=="always":
+            self.update_registry_cache()      
+        r = self._registry
+        queues = r["methods"][method]
+        ws = set()
+        for q in queues:
+            ws = sorted(list(ws.union(set(r["workers"][q]))))
+
+        return ws
+
+    def _select_queue_ref(self, method):
         """Selects a queue where the request with the method is going to be sent.
 
         Selects the queue based on:
@@ -108,28 +158,27 @@ class Client:
 
         """
         if self.check_registry == "always":
-            requests_queue = self.connector.random_queue_for_method(method)
-            if requests_queue is None:
+            queue_ref = self.connector.random_queue_for_method(method)
+            if queue_ref is None:
                 raise ValueError(f"Method {method} does not exist/is not available.")
 
         elif self.check_registry == "cache":
-            if method not in self.registry:
+            if method not in self._registry["methods"]:
                 # If `update_registry` is called every time, 'cache' is,
                 # in practice, equivalent to 'always'.
-                if method not in self.registry:
-                    self.update_registry_cache()
-                if method not in self.registry:
+                self.update_registry_cache()
+                if method not in self._registry["methods"]:
                     raise ValueError(
                         f"Method {method} does not exist/is not available."
                     )
 
-            available = self.registry[method]
-            requests_queue = random.choice(available)
+            available = self._registry["methods"][method]
+            queue_ref = random.choice(available)
 
         else:
-            requests_queue = self.default_requests_queue
+            queue_ref = self.default_queue_ref
 
-        return requests_queue
+        return queue_ref
 
     def send_single_request(
         self,
@@ -175,9 +224,9 @@ class Client:
 
         """
         if queue is not None:
-            requests_queue = queue
+            queue_ref = self.connector.get_requests_queue(queue)
         else:
-            requests_queue = self.select_queue(method)
+            queue_ref = self._select_queue_ref(method)
 
         if not is_notification:
             id_ = self.generate_id() if id is None else id
@@ -200,27 +249,13 @@ class Client:
 
         serialized_sr = self.serializer.dumps(sr)
 
-        self.connector.enqueue(requests_queue, serialized_sr)
+        self.connector.enqueue(queue_ref, serialized_sr)
         logger.debug(
-            f"{timestamp()} Client: {self.client_id} sent request with id: {id_} to queue: {requests_queue}"
+            f"{timestamp()} Client: {self.client_id} sent request with id: {id_} to queue: {queue_ref}"
         )
 
         self.pending[id_] = time.time()
-        return id_, requests_queue
-
-    def all_queues_for_method(self, method):
-        if self.check_registry == "always":
-            requests_queues = self.connector.all_queues_for_method(method)
-            if requests_queues == []:
-                raise ValueError(f"Method {method} does not exist/is not available.")
-        elif self.check_registry == "cache":
-            if method not in self.registry:
-                raise ValueError(f"Method {method} does not exist/is not available.")
-            requests_queues = self.registry[method]
-        else:
-            requests_queues = [self.default_requests_queue]
-
-        return requests_queues
+        return id_, self.simple_queue_name(queue_ref)
 
     def send_batch_request(
         self, requests_lst, queue=None, retry=None, ack=None, **options
@@ -249,20 +284,24 @@ class Client:
                 in the list of common queues.
 
         """
-        queues_sets = [set(self.all_queues_for_method(x[0])) for x in requests_lst]
+        queue_refs_sets = [set(self._all_queue_refs_for_method(x[0])) for x in requests_lst]
 
-        requests_queues = list(set.union(*queues_sets))
+        requests_queue_refs = list(set.union(*queue_refs_sets))
 
-        if len(requests_queues) == 0:
+        if len(requests_queue_refs) == 0:
             raise ValueError("No common queue for batch request.")
 
         if queue is not None:
-            if queue not in requests_queues:
+            queue_ref = self.connector.get_requests_queue(queue)
+            if queue_ref not in requests_queue_refs:
                 raise ValueError(
                     f"{queue} not in common available queues for batch request."
                 )
         else:
-            queue = random.choice(requests_queues)
+            if len(requests_queue_refs) >0:
+                queue_ref = random.choice(requests_queue_refs)
+            else:
+                queue_ref = self.default_queue_ref
 
         reply_to = None if not self.use_reply_to else self.responses_queue
 
@@ -281,11 +320,11 @@ class Client:
 
         serialized_br = self.serializer.dumps(batch_request)
 
-        self.connector.enqueue(queue, serialized_br)
+        self.connector.enqueue(queue_ref, serialized_br)
 
         ids = [t["id"] for t in batch_request]
         logger.debug(
-            f"{timestamp()} Client: {self.client_id} sent batch request with {len(ids)} requests to queue: {queue}"
+            f"{timestamp()} Client: {self.client_id} sent batch request with {len(ids)} requests to queue: {queue_ref}"
         )
 
         for id in ids:
@@ -520,7 +559,7 @@ class Client:
             AsyncResult
         """
         request = (method, args, kwargs) if retry else None
-        id, queue = self.send_single_request(method, args, kwargs, queue=queue)
+        id, queue = self.send_single_request(method, args, kwargs, queue=queue, ack=ack)
         return AsyncResult(self, id, request, queue)
 
     def rpc_sync(self, method, args=[], kwargs={}, queue=None, timeout=None):

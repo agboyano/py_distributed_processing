@@ -54,7 +54,6 @@ class Worker:
         self.requests_queues = OrderedDict()
 
         # Hay colas que igual preferimos no publicar
-        # Por ej. si hay nuchas como en globals()
         self.queues_to_register = set()
 
         # Si salta una excepción devolvemos la traza remota si with_trace=True
@@ -79,12 +78,7 @@ class Worker:
 
         Args:
             simple_queue_name (str): Simple name for the queue where requests
-                will be received. The complete name of the queue depends on wether
-                the queue is a `requests` or a `responses` queue, and is
-                obtained using the `get_requests_queue(simple_queue_name)` and
-                `get_responses_queue(simple_queue_name)` respectively from the
-                Connector's instance. In this case,
-                `get_requests_queue(simple_queue_name)` will be called.
+                will be received.
             fun_dict (dict): Dictionary with public method names as keys
                 and functions as values {"func_name":func, ...}.
             priority (int): Priority of the queue. Defaults to 10.
@@ -104,19 +98,14 @@ class Worker:
         # no olvidar self.update_registry()
 
     def add_function(self, simple_queue_name, fn_name, fn, priority=10, register=True):
-        """Add function to a queue.
+        """Add a function to a queue.
 
-        If `register` is True, the function and the queue are made public
-        with the Worker's `update_registry` method.
+        If `register` is True, and the queue doesn't exists, the function and the queue 
+        will be public when the Worker's `update_registry` method is used.
 
         Args:
             simple_queue_name (str): Simple name for the queue where requests
-                will be received. The complete name of the queue depends on wether
-                the queue is a `requests` or a `responses` queue, and is
-                obtained using the `get_requests_queue(simple_queue_name)` and
-                `get_responses_queue(simple_queue_name)` respectively from the
-                Connector's instance. In this case,
-                `get_requests_queue(simple_queue_name)` will be called.
+                will be received. 
             fn_name (str): Method name to be available for the queue.
             priority (int): Priority of the queue. Defaults to 10.
                 Queues with the same priority will be shuffled every time
@@ -312,6 +301,20 @@ class Worker:
         self.enhance_response(r, request, dispatched_to, execution_start)
         return r
 
+    def _exec_method_in_queue(self, queue_ref, method, args=[], kwargs={}):
+        funcs = self.requests_queues[queue_ref][0]
+        return funcs[method](*args, **kwargs) 
+
+
+    def exec_method(self, method, args=[], kwargs={}, queue=None):
+        "queue is the simple queue name"
+        if queue is not None:
+            queue_ref = self.connector.get_requests_queue(queue)
+            return self._exec_method_in_queue(queue_ref, method, args, kwargs)
+        else:
+            # Aquí voy a meter búsqueda de la cola con el método.
+            raise ValueError(f"queue argument can't be None.")
+
     def process_single_request(self, request, dispatched_to):
         """Process a single request.
 
@@ -358,8 +361,7 @@ class Worker:
 
         execution_start = time()
         try:
-            func = self.requests_queues[dispatched_to][0]
-            result = func[request["method"]](*args, **kwargs)
+            result = self._exec_method_in_queue(dispatched_to, request["method"], args, kwargs)
             return self.result(result, request, dispatched_to, execution_start)
 
         except TypeError:

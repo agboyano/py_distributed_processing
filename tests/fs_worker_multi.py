@@ -4,11 +4,22 @@ from time import sleep
 
 from dotenv import load_dotenv
 
+<<<<<<< HEAD
 from distributed_processing.utils import fsnode, fsworker, serialize
 
 
 def worker1(worker_id):
     server = fsworker(NS_PATH, clean=False, worker_id=worker_id)
+=======
+from distributed_processing.utils import fsnode, fsworker
+
+# logging.getLogger("distributed_processing").setLevel(logging.DEBUG)
+# logging.getLogger("fs_structs").setLevel(logging.DEBUG)
+
+
+def worker1(worker_id=None, watchdog_timeout=60):
+    server = fsworker(NS_PATH, clean=False, worker_id=worker_id, watchdog_timeout=60)
+>>>>>>> wip
 
     def info():
         rq = {}
@@ -16,7 +27,13 @@ def worker1(worker_id):
             rq[k] = set(v[0].keys())
         return server.worker_id, rq
 
+<<<<<<< HEAD
     server.add_requests_queue(server.worker_id, {"info": info})
+=======
+    func_dict0 = {"info": info}
+
+    server.add_requests_queue("cola_0", func_dict0)
+>>>>>>> wip
 
     def add(x, y):
         return x + y
@@ -54,20 +71,54 @@ def worker1(worker_id):
     func_dict2 = {"hola": hola}
 
     server.add_requests_queue("cola_2", func_dict2)
+<<<<<<< HEAD
+=======
+
+    # Truco
+    # Añado una cola que proporciona todas las funciones anteriores.
+    # La llamo como el worker y le doy prioridad 100.
+    # NO LA PUBLICO.
+    # La utilizo para hacer llamadas directas al worker, saltándome las colas.
+    server.add_requests_queue(
+        server.worker_id, dict(func_dict0, **func_dict1, **func_dict2), 100, False
+    )
+    # añado también el método eval_py_function a la cola anterior
+    server.add_python_eval(server.worker_id)
+
+    # creo cola "py_eval" con método eval_py_function
+>>>>>>> wip
     server.add_python_eval()
     server.update_methods_registry()
     return server
 
 
 if __name__ == "__main__":
+<<<<<<< HEAD
     logging.getLogger("distributed_processing").setLevel(logging.DEBUG)
     load_dotenv()
     NS_PATH = getenv("NS_PATH")
+=======
+    #logging.getLogger("distributed_processing").setLevel(logging.DEBUG)
+    load_dotenv()
+    NS_PATH = getenv("NS_PATH")
+    MASTER_QUEUE = getenv("MASTER_QUEUE")
+>>>>>>> wip
     workers_constructors = {"worker1": worker1}
     master = fsnode(
         NS_PATH,
         clean=True,
+<<<<<<< HEAD
         worker_id="node_1",
         workers_constructors=workers_constructors,
     )
+=======
+        worker_id=MASTER_QUEUE,
+        workers_constructors=workers_constructors,
+        watchdog_timeout=30,
+    )
+
+    for i in range(3):
+        master.exec_method("create_worker", ["worker1", [None, 20]], queue=MASTER_QUEUE)
+
+>>>>>>> wip
     master.run()
