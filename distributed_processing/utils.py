@@ -2,7 +2,7 @@ import atexit
 import multiprocessing as mp
 import uuid
 from collections import namedtuple
-from time import sleep
+from time import sleep, time
 
 import dill
 
@@ -27,9 +27,12 @@ def fsclient(
     return Client(DummySerializer(), fs_connector, check_registry="cache")
 
 
-def fsworker(NS_PATH, clean=False, with_watchdog=True, worker_id=None):
+def fsworker(
+    NS_PATH, clean=False, with_watchdog=True, worker_id=None, watchdog_timeout=60
+):
     fs_connector = FileSystemConnector(NS_PATH)
     fs_connector.with_watchdog = True
+    fs_connector.pop_watchdog_timeout = watchdog_timeout
     if clean:
         fs_connector.clean_namespace()
 
@@ -44,15 +47,21 @@ def deserialize(x):
     return dill.loads(x)
 
 
-def _create_worker(serialized_worker_constructor, worker_id, id, shared_dict):
+def _create_worker(serialized_worker_constructor, args, kwargs, id, shared_dict):
     worker_constructor = deserialize(serialized_worker_constructor)
-    worker = worker_constructor(worker_id)
+    worker = worker_constructor(*args, **kwargs)
     shared_dict[id] = worker.worker_id
     worker.run()
 
 
 def fsnode(
-    NS_PATH, clean=False, with_watchdog=True, worker_id=None, workers_constructors={}
+    NS_PATH,
+    clean=False,
+    with_watchdog=True,
+    worker_id=None,
+    workers_constructors={},
+    watchdog_timeout=60,
+    creation_processes_timeout=60,
 ):
     WorkerProcess = namedtuple(
         "WorkerProcess", ["p", "pid", "worker_type", "worker_id"]
@@ -72,13 +81,13 @@ def fsnode(
     def _kill_process(wp):
         if wp.p.is_alive():
             killed = False
-            #logger.info(f"Cleaning and unregistering process {wp.pid} with worker_id {wp.worker_id} of type {wp.worker_type} for {master.worker_id}.")
+            # logger.info(f"Cleaning and unregistering process {wp.pid} with worker_id {wp.worker_id} of type {wp.worker_type} for {master.worker_id}.")
             wp.p.terminate()  # Send SIGTERM
             wp.p.join(timeout=30)  # Better terminate.
             if wp.p.is_alive():
                 wp.p.kill()  # Force kill
                 killed = True
-                #logger.info(f"Killing process {wp.pid}.")
+                # logger.info(f"Killing process {wp.pid}.")
             master.connector.unregister_methods(wp.worker_id)
             return True, killed
         return False, False
@@ -92,7 +101,7 @@ def fsnode(
 
     def kill_processes(pids):
         return [kill_process(pid) for pid in pids]
-    
+
     def kill_all_processes():
         kp = []
         for wp in processes:
@@ -103,19 +112,25 @@ def fsnode(
                 kp.append(None)
         return kp
 
-    def create_process(worker_type, worker_id=None):
+    def create_process(worker_type, args=[], kwargs={}):
         id = uuid.uuid4()
         worker_constructor = workers_constructors[worker_type]
         serialized_worker_constructor = serialize(worker_constructor)
 
         p = mp.Process(
             target=_create_worker,
-            args=[serialized_worker_constructor, worker_id, id, active_workers],
+            args=[serialized_worker_constructor, args, kwargs, id, active_workers],
         )
         p.daemon = False  # will die when parent dies
         p.start()
-        while id not in active_workers:
+        start = time()
+        while (
+            id not in active_workers and (time() - start) < creation_processes_timeout
+        ):
             sleep(0.1)
+        if id not in active_workers:
+            kill_process(p.pid)
+            return None, None, None
         wp = WorkerProcess(p, p.pid, worker_type, active_workers.get(id, "error"))
         processes.append(wp)
         return p.pid, worker_type, wp.worker_id
@@ -123,7 +138,7 @@ def fsnode(
     def cleanup():
         kp = kill_all_processes()
         master.unregister()
-        return kp 
+        return kp
 
     master_funcs = {
         "create_worker": create_process,
@@ -134,7 +149,9 @@ def fsnode(
         "cleanup": cleanup,
     }
 
-    master = fsworker(NS_PATH, clean=clean, worker_id=worker_id)
+    master = fsworker(
+        NS_PATH, clean=clean, worker_id=worker_id, watchdog_timeout=watchdog_timeout
+    )
     master.add_requests_queue(master.worker_id, master_funcs)
     master.update_methods_registry()
     atexit.register(cleanup)
