@@ -1,11 +1,14 @@
+from __future__ import annotations
+
 import logging
 import random
 import time
+from typing import Any
 
 import fs_structs
 
 
-def sleep(a, b=None):
+def sleep(a: float, b: float | None = None) -> None:
     if b is None:
         time.sleep(a)
     else:
@@ -15,48 +18,51 @@ def sleep(a, b=None):
 logger = logging.getLogger(__name__)
 
 
-class FileSystemConnector(object):
+class FileSystemConnector:
     def __init__(
-        self, base_path, temp_dir=None, serializer=fs_structs.structs.joblib_serializer
+        self,
+        base_path: str,
+        temp_dir: str | None = None,
+        serializer=fs_structs.structs.joblib_serializer,
     ):
         self.namespace = fs_structs.structs.FSNamespace(base_path, temp_dir, serializer)
         self.registry = self.namespace.udict("registry")
         self.with_watchdog = True
 
-        self.pop_sleep = (5, 10)  # sólo si with_watchdog es False
+        self.pop_sleep = (5, 10)  # only used when with_watchdog is False
 
-        self.pop_timeout = 60
-        self.pop_watchdog_timeout = 60
+        self.pop_timeout: float = 60
+        self.pop_watchdog_timeout: float = 60
         self.pop_sleep_watchdog = (0.0, 0.1)
 
-        self.lock_pop_timeout = 10
-        self.lock_pop_watchdog_timeout = 2
+        self.lock_pop_timeout: float = 10
+        self.lock_pop_watchdog_timeout: float = 2
         self.lock_pop_wait = (0.0, 0.1)
 
-        self.registry_timeout = 10
+        self.registry_timeout: float = 10
 
-        self.lock_registry_timeout = 60
-        self.lock_registry_watchdog_timeout = 10
+        self.lock_registry_timeout: float = 60
+        self.lock_registry_watchdog_timeout: float = 10
         self.lock_registry_wait = (0.0, 0.1)
 
-    def clean_namespace(self):
-        "Borra todos los objetos vinculados al namespace"
+    def clean_namespace(self) -> None:
+        "Deletes every object linked to the namespace."
         self.namespace.clear()
         self.registry = self.namespace.udict("registry")
 
-    def get_requests_queue(self, queue_name):
+    def get_requests_queue(self, queue_name: str) -> str:
         return f"requests_{queue_name}"
-    
-    def requests_queue_name(self, queue_ref):
+
+    def requests_queue_name(self, queue_ref: str) -> str:
         return queue_ref.removeprefix("requests_")
 
-    def get_responses_queue(self, client_id):
+    def get_responses_queue(self, client_id: str) -> str:
         return f"{client_id}_responses"
 
-    def get_reply_to_from_id(self, id_str):
+    def get_reply_to_from_id(self, id_str: str) -> str:
         return id_str.split(":")[0] + "_responses"
 
-    def get_client_id(self):
+    def get_client_id(self) -> str:
         with fs_structs.structs.lock_context(
             self.registry.base_path,
             "nclients_lock",
@@ -68,7 +74,7 @@ class FileSystemConnector(object):
             self.registry["nclients"] = nclients
         return f"fs_client_{nclients}"
 
-    def get_server_id(self):
+    def get_server_id(self) -> str:
         with fs_structs.structs.lock_context(
             self.registry.base_path,
             "nservers_lock",
@@ -80,10 +86,8 @@ class FileSystemConnector(object):
             self.registry["nservers"] = nservers
         return f"fs_server_{nservers}"
 
-    def methods_registry(self):
-        """
-        Lo usa el cliente.
-        """
+    def methods_registry(self) -> dict:
+        """Returns {method: [queue_ref, ...]}. Used by clients."""
         registry = {}
 
         with fs_structs.structs.lock_context(
@@ -102,10 +106,8 @@ class FileSystemConnector(object):
 
         return registry
 
-    def workers_registry(self):
-        """
-        Lo usa el cliente.
-        """
+    def workers_registry(self) -> dict:
+        """Returns {queue_ref: [worker_id, ...]}. Used by clients."""
         registry = {}
 
         with fs_structs.structs.lock_context(
@@ -124,7 +126,7 @@ class FileSystemConnector(object):
 
         return registry
 
-    def register_methods(self, requests_queues_dict, worker_id):
+    def register_methods(self, requests_queues_dict: dict, worker_id: str) -> None:
         """Registers worker's public functions and their associated FIFO queues.
 
         Args:
@@ -159,18 +161,19 @@ class FileSystemConnector(object):
                 method_set = f"method_queues_{method}"
                 tmp = self.registry.get(method_set, set())
                 self.registry[method_set] = tmp.union(registry[method])
-                colas = ", ".join(str(q) for q in registry[method])
+                queues = ", ".join(str(q) for q in registry[method])
                 logger.info(
-                    f"Method {method} published as available for queues: {colas}"
+                    f"Method {method} published as available for queues: {queues}"
                 )
-            
+
             for queue_name in requests_queues_dict:
                 queue_set = f"workers_queue_{queue_name}"
                 tmp = self.registry.get(queue_set, set())
                 self.registry[queue_set] = tmp.union({worker_id})
 
-
-    def _unregister_member_from_sets(self, prefix, member, settype ="Method", listeners="queues"):
+    def _unregister_member_from_sets(
+        self, prefix, member, settype="Method", listeners="queues"
+    ):
         deleted_variables = []
         for s in [x for x in self.registry.keys() if prefix in x]:
             tmp = self.registry[s]
@@ -183,10 +186,10 @@ class FileSystemConnector(object):
                 )
                 deleted_variables.append(name)
             else:
-               self.registry[s] = tmp
+                self.registry[s] = tmp
         return deleted_variables
 
-    def unregister_methods(self, worker_id):
+    def unregister_methods(self, worker_id: str) -> None:
         with fs_structs.structs.lock_context(
             self.registry.base_path,
             "registry_lock",
@@ -194,24 +197,28 @@ class FileSystemConnector(object):
             self.lock_registry_watchdog_timeout,
             self.lock_registry_wait,
         ):
-            for queue_name in self._unregister_member_from_sets("workers_queue_", worker_id, "Queue", "workers"):
-                _ = self._unregister_member_from_sets("method_queues_", queue_name, "Method", "queues")
+            for queue_name in self._unregister_member_from_sets(
+                "workers_queue_", worker_id, "Queue", "workers"
+            ):
+                _ = self._unregister_member_from_sets(
+                    "method_queues_", queue_name, "Method", "queues"
+                )
 
-    def random_queue_for_method(self, method):
+    def random_queue_for_method(self, method: str) -> str | None:
         available = self.all_queues_for_method(method)
         if len(available) == 0:
             return None
         return random.choice(available)
 
-    def all_queues_for_method(self, method):
+    def all_queues_for_method(self, method: str) -> list:
         method_set = f"method_queues_{method}"
         return list(self.registry.get(method_set, []))
 
-    def enqueue(self, queue_name, msg):
+    def enqueue(self, queue_name: str, msg: Any) -> None:
         queue = self.namespace.list(queue_name)
         queue.append(msg)
 
-    def pop(self, queue_name, timeout=-1):
+    def pop(self, queue_name: str, timeout: float = -1) -> tuple | None:
         """Blocking pop operation for retrieving first item from a FIFO queue.
 
         Args:
@@ -263,7 +270,7 @@ class FileSystemConnector(object):
             time_left = timeout - (time.time() - start_time)
         return None  # Timeout reached
 
-    def pop_multiple(self, queue_names, timeout=-1):
+    def pop_multiple(self, queue_names: list, timeout: float = -1) -> tuple | None:
         """Blocking pop(0) from multiple FIFO queues in priority order (highest first).
 
         Args:
@@ -298,8 +305,7 @@ class FileSystemConnector(object):
         if ok := try_pop_multiple(queue_refs):
             return ok
 
-        if self.with_watchdog:
-            watch_paths = [q[1].base_path for q in queue_refs]
+        watch_paths = [q[1].base_path for q in queue_refs]
 
         start_time = time.time()
         time_left = timeout
@@ -329,7 +335,7 @@ class FileSystemConnector(object):
 
         return None  # Timeout expired
 
-    def pop_all(self, queue_name):
+    def pop_all(self, queue_name: str) -> list:
         """Pops all available messages in the queue named queue_name (in order).
 
         Used by clients.
@@ -337,4 +343,4 @@ class FileSystemConnector(object):
         queue = self.namespace.list(queue_name)
         N = len(queue)
         # using pop(0) instead of pop_left. Expected only one client per results queue
-        return [queue.pop(0) for i in range(N)]
+        return [queue.pop(0) for _ in range(N)]

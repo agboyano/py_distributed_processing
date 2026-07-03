@@ -1,12 +1,12 @@
 import datetime
-import secrets
 from math import exp, sqrt
+
 import numpy as np
 from numpy.random import PCG64, Generator
 
 # Multiprocessing con números aleatorios paralelos basados en RandomState
 # RandomState se ha quedado anticuado y utilza el generador MT19937
-# que es más lento que el generador ahora por defecto en numpy PGC64 
+# que es más lento que el generador ahora por defecto en numpy PGC64
 
 
 def new_price(S_t, v, r, t1, t2):
@@ -21,7 +21,7 @@ def df(r, t1, t2):
 
 # Multiprocessing con números aleatorios paralelos basados en RandomState
 # RandomState se ha quedado anticuado y además utilza el generador MT19937
-# que es más lento que el generador ahora por defecto en numpy PGC64 
+# que es más lento que el generador ahora por defecto en numpy PGC64
 
 def mc_autocall_mapper(nsimulations,
                        v,
@@ -123,22 +123,22 @@ def f(nsimulations):
 
 def mc_autocall_mapper2(rndg, nsimulations,
                    v=V,
-                   r=R, 
+                   r=R,
                    coupon_barrier=COUPON_BARRIER,
                    kickout_barrier=KICKOUT_BARRIER,
                    protection_barrier=PROTECTION_BARRIER,
                    coupon_rate=COUPON_RATE,
                    dates=dates):
-    
+
 
     rng = Generator(PCG64(int(rndg[0])).jumped(int(rndg[1])))
-    
+
     assert(coupon_barrier >= protection_barrier)
 
-    # Hay que tener cuidado con la desserialización desde json. 
+    # Hay que tener cuidado con la desserialización desde json.
     # En json son todo flotantes.
     nsimulations = int(nsimulations)
-    
+
     S = 1.0
     C = 1000.0
 
@@ -148,32 +148,32 @@ def mc_autocall_mapper2(rndg, nsimulations,
 
     coupons_discounted = [C * coupon_rate * df(r, start_date, dates[j]) for j in range(len(dates))]
     principal_discounted = [C * df(r, start_date, dates[j]) for j in range(len(dates))]
-    
+
     def p_exp(t1, t2):
         T = (t2 - t1) / 365.0
-        return ((r - 0.5 * v**2) * T, v * sqrt(T)) 
-        
-    
+        return ((r - 0.5 * v**2) * T, v * sqrt(T))
+
+
     partial_exp = [p_exp(dates[j], dates[j+1]) for j in range(len(dates)-1)]
-    
-    rnd = rng.standard_normal((nsimulations, len(dates)-1)) 
-    
-    
+
+    rnd = rng.standard_normal((nsimulations, len(dates)-1))
+
+
     for i in range(nsimulations):
         autocall_price = 0.0
-        
+
         for j in range(1, len(dates)):
-            S = S * exp(partial_exp[j-1][0] + partial_exp[j-1][1] * rnd[i, j-1]) 
-    
+            S = S * exp(partial_exp[j-1][0] + partial_exp[j-1][1] * rnd[i, j-1])
+
             if S > coupon_barrier:
                 autocall_price += coupons_discounted[j]
-                
+
             if S >= kickout_barrier:
                 break
 
         if S < protection_barrier:
             autocall_price += S * principal_discounted[j]
-                
+
         else:
             autocall_price += principal_discounted[j]
 
@@ -188,7 +188,7 @@ def f2(x):
     return mc_autocall_mapper2(rndg=(seed, jump),
                                 nsimulations=nsim,
                                 v=V,
-                                r=R, 
+                                r=R,
                                 coupon_barrier=COUPON_BARRIER,
                                 kickout_barrier=KICKOUT_BARRIER,
                                 protection_barrier=PROTECTION_BARRIER,
@@ -198,13 +198,12 @@ def f2(x):
 
 def mc_autocall_empty_mapper(rndg, nsimulations,
                    v=V,
-                   r=R, 
+                   r=R,
                    coupon_barrier=COUPON_BARRIER,
                    kickout_barrier=KICKOUT_BARRIER,
                    protection_barrier=PROTECTION_BARRIER,
                    coupon_rate=COUPON_RATE,
                    dates=dates):
-    
+
 
     return 1045.0, float(nsimulations)
-    

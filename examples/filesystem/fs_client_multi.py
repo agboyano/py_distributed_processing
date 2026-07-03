@@ -15,7 +15,6 @@ NS_PATH = getenv("NS_PATH")
 
 
 # %%
-import logging
 
 # logging.getLogger("distributed_processing").setLevel(logging.DEBUG)
 # logging.getLogger("distributed_processing.filesystem_connector").setLevel(logging.DEBUG)

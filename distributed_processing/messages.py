@@ -1,26 +1,31 @@
+from __future__ import annotations
+
 import traceback
 from time import time
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from typing_extensions import TypeGuard
 
 
 def single_request(
-    method,
-    args=None,
-    kwargs=None,
-    id=None,
-    reply_to=None,
-    ack=None,
-    is_notification=False,
-    **options,
-):
-    sr = {"method": method}
+    method: str,
+    args: list | None = None,
+    kwargs: dict | None = None,
+    id: str | None = None,
+    reply_to: str | None = None,
+    ack: bool | None = None,
+    is_notification: bool = False,
+    **options: Any,
+) -> dict:
+    sr: dict = {"method": method}
 
     args = None if args is None or len(args) == 0 else args
     kwargs = None if kwargs is None or len(kwargs) == 0 else kwargs
 
     sr["is_notification"] = is_notification
 
-    # Si es una notificación no incluimos id si es None
-
+    # Notifications carry no id.
     if id is None and not is_notification:
         raise TypeError("id must be not null if not a notification")
 
@@ -50,17 +55,22 @@ def single_request(
     return sr
 
 
-def is_single_request(request):
+def is_single_request(request: Any) -> TypeGuard[dict]:
     return isinstance(request, dict) and "method" in request
 
 
-def is_batch_request(request):
+def is_batch_request(request: Any) -> TypeGuard[list]:
     return (
         isinstance(request, list) and len(request) > 0 and is_single_request(request[0])
     )
 
 
-def error_response(code, id=None, with_trace=False, message="Undefined error"):
+def error_response(
+    code: int,
+    id: str | None = None,
+    with_trace: bool = False,
+    message: str = "Undefined error",
+) -> dict:
     # is_notification is temporarily necessary in a response
     # because it is used to decide, once the request is processed,
     # whether to send the response or not. Should be deleted before
@@ -88,18 +98,10 @@ def error_response(code, id=None, with_trace=False, message="Undefined error"):
     return er
 
 
-def result_response(result=None, id=None):
-    # is_notification is temporarily necessary in a response
-    # because it is used to decide, once the request is processed,
-    # whether to send the response or not. Should be deleted before
-    # sending the message.
-    # Similarly, reply_to is not needed in the response and it could
-    # be misinterpreted, as is related with the reply_to queue of the original
-    # request. It is only used to keep track in the worker's code of the queue where
-    # the response has to be sent.
-    #
-    # NOT PRETTY
-    rr = {"result": result}
+def result_response(result: Any = None, id: str | None = None) -> dict:
+    # See the note in error_response about the temporary keys
+    # is_notification and reply_to.
+    rr: dict = {"result": result}
 
     if id is not None:
         rr["id"] = id
@@ -107,23 +109,23 @@ def result_response(result=None, id=None):
     return rr
 
 
-def ack(id, worker, queue):
+def ack(id: str | None, worker: str, queue: str) -> dict:
     return {"ack": {"id": id, "worker": worker, "queue": queue, "time": time()}}
 
 
-def is_ack(response):
+def is_ack(response: Any) -> bool:
     return "ack" in response
 
 
-def is_single_response(response):
+def is_single_response(response: Any) -> TypeGuard[dict]:
     return isinstance(response, dict) and ("result" in response or "error" in response)
 
 
-def is_error_response(response):
+def is_error_response(response: Any) -> TypeGuard[dict]:
     return isinstance(response, dict) and ("error" in response)
 
 
-def is_batch_response(response):
+def is_batch_response(response: Any) -> TypeGuard[list]:
     return (
         isinstance(response, list)
         and len(response) > 0

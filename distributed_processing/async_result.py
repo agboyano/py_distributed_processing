@@ -1,13 +1,16 @@
+from __future__ import annotations
+
 import logging
 from datetime import datetime
 from time import time
+from typing import Any
 
 from .exceptions import RemoteException
 
 logger = logging.getLogger(__name__)
 
 
-def timestamp():
+def timestamp() -> str:
     return datetime.now().isoformat()
 
 
@@ -17,30 +20,36 @@ FAILED = "FAILED"
 CLEANED = "CLEANED"
 
 
-class AsyncResult(object):
-    def __init__(self, rpc_client, id, request=None, queue=None):
+class AsyncResult:
+    def __init__(
+        self,
+        rpc_client,
+        id: str,
+        request: tuple | None = None,
+        queue: str | None = None,
+    ):
         self._client = rpc_client
         self.id = id
         self._status = PENDING
-        self.value = None
-        self.error = None
+        self.value: Any = None
+        self.error: dict | None = None
         self.creation_time = time()
-        self.finished_time = None
+        self.finished_time: float | None = None
         self.request = request
         self.queue = queue
         self.retries = 0
-        self.metadata = {}
+        self.metadata: dict = {}
 
-    def ok(self):
+    def ok(self) -> bool:
         return self.status == OK
 
-    def failed(self):
+    def failed(self) -> bool:
         return self.status == FAILED
 
-    def done(self):
+    def done(self) -> bool:
         return self.ok() or self.failed()
 
-    def pending(self):
+    def pending(self) -> bool:
         """Returns True if the state of the AsyncResult object is 'PENDING'.
 
         Syncs the object with rpc_client, just in case we have used wait_responses
@@ -53,7 +62,7 @@ class AsyncResult(object):
         """
         return self.status == PENDING
 
-    def _raise_exception(self, error):
+    def _raise_exception(self, error: dict) -> None:
         """Raises a RemoteException with the information in error.
 
         Args:
@@ -66,7 +75,7 @@ class AsyncResult(object):
         raise RemoteException(error)
 
     @property
-    def status(self):
+    def status(self) -> str:
         """Returns the status of the AsyncResult object.
 
         Syncs the object with rpc_client, just in case we have used wait_responses
@@ -84,7 +93,7 @@ class AsyncResult(object):
                 pass
         return self._status
 
-    def get(self, timeout=None, clean=True):
+    def get(self, timeout: float | None = None, clean: bool = True) -> Any:
         """Returns the value of the AsyncResult object.
 
         Throws a RemoteException exception with the information
@@ -107,10 +116,10 @@ class AsyncResult(object):
         if self.ok():
             return self.value
         elif self.failed():
-            self._raise_exception(self.error)
+            self._raise_exception(self.error or {})
         raise ValueError("AsyncResult: Undefined Value.")  # shouldn`t happen
 
-    def wait(self, timeout=None, clean=True):
+    def wait(self, timeout: float | None = None, clean: bool = True) -> None:
         """Waits for result and updates the AsyncResult object.
 
         Throws TimeoutError if timeout reached.
@@ -142,13 +151,18 @@ class AsyncResult(object):
                 self.error = response["error"]
                 self.metadata = response.get("metadata", {})
 
-    def safe_get(self, timeout=None, clean=True, default=None):
+    def safe_get(
+        self,
+        timeout: float | None = None,
+        clean: bool = True,
+        default: Any = None,
+    ) -> Any:
         try:
             return self.get(timeout, clean=clean)
-        except:
+        except Exception:
             return default
 
-    def retry(self, queue=None):
+    def retry(self, queue: str | None = None) -> bool:
         """Retries the request linked to the AsyncResult instance.
 
         Only retries if the request is pending.
@@ -188,7 +202,12 @@ class AsyncResult(object):
             return False
 
 
-def gather(fs, timeout=None, step=5, max_dt=30):
+def gather(
+    fs: list,
+    timeout: float | None = None,
+    step: float = 5,
+    max_dt: float = 30,
+) -> bool:
     """Gathers all AsyncResults in the list.
 
     Assumes all requests were sent by the same client. If no progress is

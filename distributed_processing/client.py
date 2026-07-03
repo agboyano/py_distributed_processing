@@ -1,8 +1,11 @@
+from __future__ import annotations
+
 import base64
 import logging
 import random
 import time
 from datetime import datetime
+from typing import Any, Callable
 
 import dill
 
@@ -12,13 +15,18 @@ from .messages import is_ack, is_batch_response, is_single_response, single_requ
 logger = logging.getLogger(__name__)
 
 
-def timestamp():
+def timestamp() -> str:
     return datetime.now().isoformat()
 
 
-def serialize_python_call(fn, args=[], kwargs={}):
+def serialize_python_call(
+    fn: Callable, args: list | None = None, kwargs: dict | None = None
+) -> list:
+    args = [] if args is None else args
+    kwargs = {} if kwargs is None else kwargs
     pickled_fn = dill.dumps(fn)
-    # Decode ascii necesario para que no de error de bytes object no serializable
+    # Decoding to ascii is needed so the message stays serializable
+    # (bytes objects are not JSON serializable).
     return [base64.b64encode(pickled_fn).decode("ascii"), args, kwargs]
 
 
@@ -27,11 +35,11 @@ class Client:
         self,
         serializer,
         connector,
-        client_id=None,
-        check_registry="cache",
-        use_reply_to=False,
-        default_queue="default",
-        timeout=24 * 60 * 60,
+        client_id: str | None = None,
+        check_registry: str = "cache",
+        use_reply_to: bool = False,
+        default_queue: str = "default",
+        timeout: float | None = 24 * 60 * 60,
     ):
         self.serializer = serializer
         self.connector = connector
@@ -40,22 +48,22 @@ class Client:
 
         # Cache for pending responses with id.
         # ids as keys and time() of message creation as values.
-        self.pending = {}
+        self.pending: dict = {}
         # Cache for responses with id.
         # ids as keys and deserialized responses as values.
-        self.responses = {}
-        # Cache for notifications (recieved messages with no id)
+        self.responses: dict = {}
+        # Cache for notifications (received messages with no id).
         # Deserialized responses as values.
-        self.notifications = []
+        self.notifications: list = []
         # Cache for responses that failed to be deserialized.
-        self.responses_parse_errors = []
+        self.responses_parse_errors: list = []
         # Cache for acks
-        self.acks = {}
+        self.acks: dict = {}
         # Used responses (wait_one_response).
-        self.responses_used = set()
+        self.responses_used: set = set()
 
         self.check_registry = check_registry
-        self._registry = {}
+        self._registry: dict = {}
 
         if check_registry == "cache":
             self.update_registry_cache()
@@ -78,25 +86,25 @@ class Client:
 
         self.timeout = timeout
 
-    def set_default_queue(self, queue):
+    def set_default_queue(self, queue: str) -> None:
         self.default_queue_ref = self.connector.get_requests_queue(queue)
 
-    def to_requests_queue_ref(self, queue_name):
+    def to_requests_queue_ref(self, queue_name: str) -> str:
         return self.connector.get_requests_queue(queue_name)
-    
-    def simple_queue_name(self, queue_ref):
+
+    def simple_queue_name(self, queue_ref: str) -> str:
         return self.connector.requests_queue_name(queue_ref)
 
-    def generate_id(self):
+    def generate_id(self) -> str:
         self.last_request_idnumber += 1
         self.last_request_id = f"{self.client_id}:{str(self.last_request_idnumber)}"
         return self.last_request_id
 
-    def update_registry_cache(self):
+    def update_registry_cache(self) -> None:
         self._registry["methods"] = self.connector.methods_registry()
         self._registry["workers"] = self.connector.workers_registry()
 
-    def registry(self, update=False):
+    def registry(self, update: bool = False) -> dict:
         registry = {}
         if update:
             self.update_registry_cache()
@@ -104,16 +112,20 @@ class Client:
         if "methods" in self._registry:
             registry["methods"] = {}
             for method in self._registry["methods"]:
-                registry["methods"][method] = [self.simple_queue_name(x) for x in self._registry["methods"][method]]
+                registry["methods"][method] = [
+                    self.simple_queue_name(x) for x in self._registry["methods"][method]
+                ]
 
         if "workers" in self._registry:
             registry["workers"] = {}
             for queue_ref in self._registry["workers"]:
-                registry["workers"][self.simple_queue_name(queue_ref)] = self._registry["workers"][queue_ref]
-        
+                registry["workers"][self.simple_queue_name(queue_ref)] = self._registry[
+                    "workers"
+                ][queue_ref]
+
         return registry
 
-    def _all_queue_refs_for_method(self, method):
+    def _all_queue_refs_for_method(self, method: str) -> list:
         if self.check_registry == "always":
             return self.connector.all_queues_for_method(method)
         elif self.check_registry == "cache":
@@ -123,14 +135,16 @@ class Client:
         else:
             return [self.default_queue_ref]
 
-    def all_queues_for_method(self, method, update=False):
-        if update and self.check_registry=="cache":
+    def all_queues_for_method(self, method: str, update: bool = False) -> list:
+        if update and self.check_registry == "cache":
             self.update_registry_cache()
-        return [self.simple_queue_name(x) for x in self._all_queue_refs_for_method(method)]
-    
-    def all_workers_for_method(self, method, update=False):
-        if update or self.check_registry=="always":
-            self.update_registry_cache()      
+        return [
+            self.simple_queue_name(x) for x in self._all_queue_refs_for_method(method)
+        ]
+
+    def all_workers_for_method(self, method: str, update: bool = False) -> list:
+        if update or self.check_registry == "always":
+            self.update_registry_cache()
         r = self._registry
         queues = r["methods"][method]
         ws = set()
@@ -139,7 +153,7 @@ class Client:
 
         return sorted(ws)
 
-    def _select_queue_ref(self, method):
+    def _select_queue_ref(self, method: str) -> str:
         """Selects a queue where the request with the method is going to be sent.
 
         Selects the queue based on:
@@ -182,16 +196,16 @@ class Client:
 
     def send_single_request(
         self,
-        method,
-        args=None,
-        kwargs=None,
-        queue=None,
-        id=None,
-        reply_to=None,
-        ack=None,
-        is_notification=False,
-        **options,
-    ):
+        method: str,
+        args: list | None = None,
+        kwargs: dict | None = None,
+        queue: str | None = None,
+        id: str | None = None,
+        reply_to: str | None = None,
+        ack: bool | None = None,
+        is_notification: bool = False,
+        **options: Any,
+    ) -> tuple:
         """Sends a single RPC `request`.
 
         If no `id` is provided and `is_notification` is False, generates a new one.
@@ -260,8 +274,13 @@ class Client:
         return id_, self.simple_queue_name(queue_ref)
 
     def send_batch_request(
-        self, requests_lst, queue=None, retry=None, ack=None, **options
-    ):
+        self,
+        requests_lst: list,
+        queue: str | None = None,
+        retry: bool | None = None,
+        ack: bool | None = None,
+        **options: Any,
+    ) -> list:
         """Sends an batch request that will be executed by a single worker.
 
         Args:
@@ -289,7 +308,9 @@ class Client:
         if len(requests_lst) == 0:
             raise ValueError("Empty batch request.")
 
-        queue_refs_sets = [set(self._all_queue_refs_for_method(x[0])) for x in requests_lst]
+        queue_refs_sets = [
+            set(self._all_queue_refs_for_method(x[0])) for x in requests_lst
+        ]
 
         # The batch is processed by a single worker, so the target queue
         # must be available for every method in the batch.
@@ -336,7 +357,7 @@ class Client:
 
         return ids
 
-    def _responses_to_dicts(self, raw_responses):
+    def _responses_to_dicts(self, raw_responses: list) -> tuple:
         """Deserialize responses.
 
         Args:
@@ -364,7 +385,7 @@ class Client:
         for e in raw_responses:
             try:
                 r = self.serializer.loads(e)
-            except:
+            except Exception:
                 parse_errors.append(e)
                 logger.debug(
                     f"{timestamp()} Client: {self.client_id} a Message could NOT be deserialized"
@@ -415,7 +436,7 @@ class Client:
 
         return results_dict, no_id, parse_errors, acks_dict
 
-    def _update_responses_cache(self, raw_responses):
+    def _update_responses_cache(self, raw_responses: list) -> None:
         """Deserialize raw_responses and update caches.
 
         Updates the client caches responses, notifications, responses_parse_errors and pending.
@@ -440,11 +461,13 @@ class Client:
             if id in self.responses:
                 del self.acks[id]
 
-    def _update_cache_with_all_available_responses(self):
+    def _update_cache_with_all_available_responses(self) -> None:
         all_responses = self.connector.pop_all(self.responses_queue)
         self._update_responses_cache(all_responses)
 
-    def wait_responses(self, ids=None, timeout=None):
+    def wait_responses(
+        self, ids: list | None = None, timeout: float | None = None
+    ) -> list:
         """Wait for all responses in ids.
 
         If ids is None, waits for all pending ids.
@@ -482,14 +505,13 @@ class Client:
 
         pending = [k for k in pending if k not in self.responses]
 
-        if timeout is None:
-            forever, time_left = True, -1
+        # timeout may still be None here if self.timeout is None:
+        # in that case wait forever.
+        forever = timeout is None
+        t_0 = time.time()
+        time_left = -1.0 if timeout is None else timeout
 
-        else:
-            t_0 = time.time()
-            forever, time_left = False, timeout
-
-        while (len(pending) > 0) and ((time_left > 0.000001) or forever):
+        while (len(pending) > 0) and (forever or time_left > 0.000001):
             next_resp = self.connector.pop(self.responses_queue, timeout=time_left)
 
             if (
@@ -497,14 +519,16 @@ class Client:
             ):  # if None then timeout, if not (queue_name, value)
                 self._update_responses_cache([next_resp[1]])
 
-            if not forever:
+            if timeout is not None:
                 time_left = timeout - (time.time() - t_0)
 
             pending = [k for k in pending if k not in self.responses]
 
         return pending
 
-    def wait_one_response(self, id, timeout=None, clean=True):
+    def wait_one_response(
+        self, id: str, timeout: float | None = None, clean: bool = True
+    ) -> dict:
         """Wait for the response with id=id.
 
         Used by de get method of AsyncResult.
@@ -537,14 +561,22 @@ class Client:
 
         return response
 
-    def clean_used(self):
+    def clean_used(self) -> None:
         """Clean all responses that have been used at least once."""
         responses = [k for k in self.responses]
         for id in responses:
             if id in self.responses_used:
                 del self.responses[id]
 
-    def rpc_async(self, method, args=[], kwargs={}, queue=None, retry=False, ack=None):
+    def rpc_async(
+        self,
+        method: str,
+        args: list | None = None,
+        kwargs: dict | None = None,
+        queue: str | None = None,
+        retry: bool = False,
+        ack: bool | None = None,
+    ) -> AsyncResult:
         """Sends an asynchronous single request.
 
         Args:
@@ -567,7 +599,14 @@ class Client:
         id, queue = self.send_single_request(method, args, kwargs, queue=queue, ack=ack)
         return AsyncResult(self, id, request, queue)
 
-    def rpc_sync(self, method, args=[], kwargs={}, queue=None, timeout=None):
+    def rpc_sync(
+        self,
+        method: str,
+        args: list | None = None,
+        kwargs: dict | None = None,
+        queue: str | None = None,
+        timeout: float | None = None,
+    ) -> Any:
         """Sends an asynchronous single request.
 
         Args:
@@ -590,7 +629,13 @@ class Client:
         """
         return self.rpc_async(method, args, kwargs, queue).get(timeout)
 
-    def rpc_batch_async(self, requests_lst, queue=None, retry=False, ack=None):
+    def rpc_batch_async(
+        self,
+        requests_lst: list,
+        queue: str | None = None,
+        retry: bool = False,
+        ack: bool | None = None,
+    ) -> list:
         """Sends an asynchronous batch request that will be executed by a single worker.
 
         Each individual request within the batch has is own id assigned.
@@ -615,7 +660,7 @@ class Client:
         ids = self.send_batch_request(requests_lst, queue=queue, retry=retry, ack=ack)
         return [AsyncResult(self, id) for id in ids]
 
-    def rpc_batch_sync(self, requests_lst, timeout=None):
+    def rpc_batch_sync(self, requests_lst: list, timeout: float | None = None) -> list:
         """Sends a synchronous batch request that will be executed by a single worker.
 
         Waits for the results.
@@ -636,7 +681,9 @@ class Client:
         fs = self.rpc_batch_async(requests_lst)
         return [f.safe_get(timeout=timeout) for f in fs]
 
-    def rpc_multi_async(self, requests_lst, retry=False, ack=None):
+    def rpc_multi_async(
+        self, requests_lst: list, retry: bool = False, ack: bool | None = None
+    ) -> list:
         """Sends multiple asynchronous requests that will be distributed among workers.
 
         Args:
@@ -655,7 +702,7 @@ class Client:
         """
         return [self.rpc_async(*t[:], retry=retry, ack=ack) for t in requests_lst]
 
-    def rpc_multi_sync(self, requests_lst, timeout=None):
+    def rpc_multi_sync(self, requests_lst: list, timeout: float | None = None) -> list:
         """Sends multiple synchronous requests that will be distributed among workers.
 
         Waits for the results.
@@ -679,7 +726,15 @@ class Client:
         fs = self.rpc_multi_async(requests_lst, retry=False)
         return [f.safe_get(timeout=timeout) for f in fs]
 
-    def rpc_async_fn(self, fn, args=[], kwargs={}, queue=None, retry=False, ack=None):
+    def rpc_async_fn(
+        self,
+        fn: Callable,
+        args: list | None = None,
+        kwargs: dict | None = None,
+        queue: str | None = None,
+        retry: bool = False,
+        ack: bool | None = None,
+    ) -> AsyncResult:
         """Sends an asynchronous single request with a local python function.
 
         Args:
@@ -709,7 +764,14 @@ class Client:
         id, queue = self.send_single_request(method, args=args, queue=queue, ack=ack)
         return AsyncResult(self, id, request, queue)
 
-    def rpc_sync_fn(self, method, args=[], kwargs={}, queue=None, timeout=None):
+    def rpc_sync_fn(
+        self,
+        fn: Callable,
+        args: list | None = None,
+        kwargs: dict | None = None,
+        queue: str | None = None,
+        timeout: float | None = None,
+    ) -> Any:
         """Sends a synchronous single request with a local python function.
 
         Args:
@@ -731,4 +793,4 @@ class Client:
             RemoteException
 
         """
-        return self.rpc_async_fn(method, args, kwargs, queue).get(timeout)
+        return self.rpc_async_fn(fn, args, kwargs, queue).get(timeout)

@@ -1,8 +1,12 @@
+from __future__ import annotations
+
 import atexit
+import logging
 import multiprocessing as mp
 import uuid
 from collections import namedtuple
 from time import sleep, time
+from typing import Any
 
 import dill
 
@@ -11,16 +15,18 @@ from .filesystem_connector import FileSystemConnector
 from .serializers import DummySerializer
 from .worker import Worker
 
-dill.settings["recurse"] = True  # importante
-
-import logging
+# Serialize the whole closure of the functions sent between processes.
+dill.settings["recurse"] = True
 
 logger = logging.getLogger(__name__)
 
 
 def fsclient(
-    NS_PATH, check_registry="cache", with_watchdog=True, pop_watchdog_timeout=10
-):
+    NS_PATH: str,
+    check_registry: str = "cache",
+    with_watchdog: bool = True,
+    pop_watchdog_timeout: float = 10,
+) -> Client:
     fs_connector = FileSystemConnector(NS_PATH)
     fs_connector.with_watchdog = with_watchdog
     fs_connector.pop_watchdog_timeout = pop_watchdog_timeout
@@ -28,8 +34,12 @@ def fsclient(
 
 
 def fsworker(
-    NS_PATH, clean=False, with_watchdog=True, worker_id=None, watchdog_timeout=60
-):
+    NS_PATH: str,
+    clean: bool = False,
+    with_watchdog: bool = True,
+    worker_id: str | None = None,
+    watchdog_timeout: float = 60,
+) -> Worker:
     fs_connector = FileSystemConnector(NS_PATH)
     fs_connector.with_watchdog = with_watchdog
     fs_connector.pop_watchdog_timeout = watchdog_timeout
@@ -39,11 +49,11 @@ def fsworker(
     return Worker(DummySerializer(), fs_connector, worker_id=worker_id)
 
 
-def serialize(x):
+def serialize(x: Any) -> bytes:
     return dill.dumps(x)
 
 
-def deserialize(x):
+def deserialize(x: bytes) -> Any:
     return dill.loads(x)
 
 
@@ -55,14 +65,15 @@ def _create_worker(serialized_worker_constructor, args, kwargs, id, shared_dict)
 
 
 def fsnode(
-    NS_PATH,
-    clean=False,
-    with_watchdog=True,
-    worker_id=None,
-    workers_constructors={},
-    watchdog_timeout=60,
-    creation_processes_timeout=60,
-):
+    NS_PATH: str,
+    clean: bool = False,
+    with_watchdog: bool = True,
+    worker_id: str | None = None,
+    workers_constructors: dict | None = None,
+    watchdog_timeout: float = 60,
+    creation_processes_timeout: float = 60,
+) -> Worker:
+    workers_constructors = {} if workers_constructors is None else workers_constructors
     WorkerProcess = namedtuple(
         "WorkerProcess", ["p", "pid", "worker_type", "worker_id"]
     )
@@ -107,11 +118,13 @@ def fsnode(
             try:
                 kp.append(_kill_process(wp))
                 sleep(1)
-            except:
+            except Exception:
                 kp.append(None)
         return kp
 
-    def create_process(worker_type, args=[], kwargs={}):
+    def create_process(worker_type, args=None, kwargs=None):
+        args = [] if args is None else args
+        kwargs = {} if kwargs is None else kwargs
         id = uuid.uuid4()
         worker_constructor = workers_constructors[worker_type]
         serialized_worker_constructor = serialize(worker_constructor)

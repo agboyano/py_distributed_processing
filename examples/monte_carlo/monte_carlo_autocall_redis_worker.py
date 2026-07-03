@@ -1,12 +1,10 @@
 import argparse
-import datetime
-from math import exp, sqrt
-import numpy as np
-from distributed_processing.serializers import JsonSerializer
-from distributed_processing.worker import Worker
-from distributed_processing.redis_connector import RedisConnector
+
 import mc_autocall_mapper
 
+from distributed_processing.redis_connector import RedisConnector
+from distributed_processing.serializers import JsonSerializer
+from distributed_processing.worker import Worker
 
 REDIS_HOST = "localhost"
 REDIS_PORT = 6379

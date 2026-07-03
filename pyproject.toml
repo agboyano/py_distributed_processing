@@ -17,7 +17,25 @@ redis = ["redis"]
 # Install it locally, e.g.: pip install -e ../fs_structs
 fs = ["fs_structs", "watchdog"]
 all = ["distributed-processing[redis,fs]"]
-dev = ["pytest"]
+dev = ["pytest", "ruff"]
+
+[tool.ruff]
+target-version = "py39"
+line-length = 88
+extend-exclude = ["*.ipynb"]
+
+[tool.ruff.lint]
+select = [
+    "E",  # pycodestyle errors
+    "W",  # pycodestyle warnings
+    "F",  # pyflakes
+    "B",  # bugbear (mutable defaults, etc.)
+    "I",  # isort
+    "UP", # pyupgrade
+]
+# Long log/docstring lines: the formatter does not split strings and
+# rewrapping them all is not worth the diff noise.
+ignore = ["E501"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

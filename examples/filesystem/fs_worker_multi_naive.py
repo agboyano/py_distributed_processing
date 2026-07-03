@@ -1,11 +1,11 @@
 # %%
-from time import sleep
 import multiprocessing as mp
-import dill
 import uuid
+from time import sleep
+
+import dill
 
 from distributed_processing.utils import fsworker
-
 
 #from multi import worker1
 
@@ -26,7 +26,7 @@ import logging
 logging.getLogger("distributed_processing").setLevel(logging.DEBUG)
 
 # %%
-# clean = True limpia namespace. Por defecto, False 
+# clean = True limpia namespace. Por defecto, False
 def _mp_worker_wrapper(serialized_func, serialized_args, serialized_kwargs, result_queue=None):
     """
     Global wrapper: deserialize function & arguments, call function,
@@ -148,7 +148,7 @@ if __name__ == '__main__':
                 "kill_process":kill_process,
                 "kill_processes":kill_processes}
 
-    
+
     master = fsworker(NS_PATH, clean=True, worker_id ="node_1")
     master.add_requests_queue(master.worker_id, master_funcs)
     master.update_methods_registry()

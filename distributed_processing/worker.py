@@ -1,35 +1,38 @@
+from __future__ import annotations
+
 import base64
 import logging
 import random
-from collections import OrderedDict
 from datetime import datetime
 from time import time
+from typing import Any, Callable
 
 import dill
 
 from .messages import (
     ack,
     error_response,
-    is_ack,
     is_batch_request,
     is_batch_response,
-    is_error_response,
     is_single_request,
     is_single_response,
     result_response,
 )
 
 
-def timestamp():
+def timestamp() -> str:
     return datetime.now().isoformat()
 
 
 logger = logging.getLogger(__name__)
-# logger.setLevel(logging.DEBUG)
 
 
-def eval_py_function(str_fn, args=[], kwargs={}):
-    "str_fn encoded en base64 ascii"
+def eval_py_function(
+    str_fn: str, args: list | None = None, kwargs: dict | None = None
+) -> Any:
+    "Evals a dill-serialized function. str_fn is encoded in base64 ascii."
+    args = [] if args is None else args
+    kwargs = {} if kwargs is None else kwargs
     return dill.loads(base64.b64decode(str_fn))(*args, **kwargs)
 
 
@@ -38,30 +41,28 @@ class Worker:
         self,
         serializer,
         connector,
-        worker_id=None,
-        with_trace=True,
-        reply_to_default=None,
+        worker_id: str | None = None,
+        with_trace: bool = True,
+        reply_to_default: str | None = None,
     ):
         self.serializer = serializer
         self.connector = connector
 
-        # El orden de inserción define la prioridad de las colas
-        # OrderedDict no longer necessary. Dicts respect key insertion
-        # order since Python 3.7.
-        # queue names as keys, (dict, int) as value
-        # where dict has function names as keys and function as
-        # values and int is the priority of the queue.
-        self.requests_queues = OrderedDict()
+        # Insertion order defines queue priority (dicts respect key
+        # insertion order since Python 3.7).
+        # Queue refs as keys, ({method_name: function, ...}, priority)
+        # tuples as values.
+        self.requests_queues: dict = {}
 
-        # Hay colas que igual preferimos no publicar
-        self.queues_to_register = set()
+        # Some queues may be kept out of the public registry.
+        self.queues_to_register: set = set()
 
-        # Si salta una excepción devolvemos la traza remota si with_trace=True
+        # If with_trace is True, remote exceptions include the traceback.
         self.with_trace = with_trace
 
-        # Podemos definir una cola de respuesta por defecto.
-        # Sólo se utiliza si el request que recibimos no tiene una clave "reply_to".
-        # Si es None obtiene el "reply_to" de la "id" de la request recibida
+        # Optional default response queue. Only used when the incoming
+        # request has no "reply_to" key. If None, the "reply_to" is derived
+        # from the request "id".
         self.reply_to_default = reply_to_default
         self.worker_id = (
             worker_id if worker_id is not None else self.connector.get_server_id()
@@ -70,24 +71,28 @@ class Worker:
         logger.info(f"Worker id: {self.worker_id}")
 
     def add_requests_queue(
-        self, simple_queue_name, func_dict, priority=10, register=True
-    ):
+        self,
+        simple_queue_name: str,
+        func_dict: dict,
+        priority: int = 10,
+        register: bool = True,
+    ) -> None:
         """Add queue with functions.
 
         If `register` is True, the functions and their queues are made public
-        with the Worker's `update_registry` method.
+        with the Worker's `update_methods_registry` method.
 
         Args:
             simple_queue_name (str): Simple name for the queue where requests
                 will be received.
-            fun_dict (dict): Dictionary with public method names as keys
+            func_dict (dict): Dictionary with public method names as keys
                 and functions as values {"func_name":func, ...}.
             priority (int): Priority of the queue. Defaults to 10.
                 Queues with the same priority will be shuffled every time
                 the worker checks for a new request.
-            publish (bool): Defaults to True. If False, functions (methods)
+            register (bool): Defaults to True. If False, functions (methods)
                 and their queues are not made public, but remain available
-                anonymously.This prevents exposing queues that may contain
+                anonymously. This prevents exposing queues that may contain
                 many methods or should remain private.
 
         """
@@ -96,17 +101,24 @@ class Worker:
         self.requests_queues[requests_queue] = (func_dict, priority)
         if register:
             self.queues_to_register.add(requests_queue)
-        # no olvidar self.update_registry()
+        # remember to call self.update_methods_registry() afterwards
 
-    def add_function(self, simple_queue_name, fn_name, fn, priority=10, register=True):
+    def add_function(
+        self,
+        simple_queue_name: str,
+        fn_name: str,
+        fn: Callable,
+        priority: int = 10,
+        register: bool = True,
+    ) -> None:
         """Add a function to a queue.
 
-        If `register` is True, and the queue doesn't exists, the function and the queue 
-        will be public when the Worker's `update_registry` method is used.
+        If `register` is True, and the queue doesn't exist, the function and the queue
+        will be public when the Worker's `update_methods_registry` method is used.
 
         Args:
             simple_queue_name (str): Simple name for the queue where requests
-                will be received. 
+                will be received.
             fn_name (str): Method name to be available for the queue.
             priority (int): Priority of the queue. Defaults to 10.
                 Queues with the same priority will be shuffled every time
@@ -124,24 +136,27 @@ class Worker:
             )
         else:
             self.requests_queues[requests_queue][0][fn_name] = fn
-        # no olvidar self.update_registry()
+        # remember to call self.update_methods_registry() afterwards
 
-    def add_python_eval(self, simple_queue_name="py_eval", priority=20, register=True):
+    def add_python_eval(
+        self,
+        simple_queue_name: str = "py_eval",
+        priority: int = 20,
+        register: bool = True,
+    ) -> None:
         """Adds a queue with the method `eval_py_function`, that evals a serialized python function.
 
+        SECURITY WARNING: `eval_py_function` executes arbitrary Python code
+        sent by clients. Only use it on trusted infrastructure.
+
         If `register` is True, `eval_py_function` and the queue are made public
-        with the Worker's `update_registry` method.
+        with the Worker's `update_methods_registry` method.
 
         Equivalent to:
 
-        import dill
-        import base64
-
-        def eval_py_function(str_fn, args=[], kwargs={}):
-            "str_fn encoded en base64 ascii"
-            return dill.loads(base64.b64decode(str_fn))(*args, **kwargs)
-
-        server.add_requests_queue("py_eval", {"eval_py_function": eval_py_function})
+            server.add_requests_queue(
+                "py_eval", {"eval_py_function": eval_py_function}
+            )
 
         Args:
             simple_queue_name (str): Simple name for the queue where requests
@@ -158,11 +173,11 @@ class Worker:
             simple_queue_name, "eval_py_function", eval_py_function, priority, register
         )
 
-    def add_requests_queues(self, queues, register=True):
+    def add_requests_queues(self, queues: dict, register: bool = True) -> None:
         """Add the information in the queues dict to the registry.
 
         If `register` is True, the functions and their queues are made public
-        with the Worker's `update_registry` method.
+        with the Worker's `update_methods_registry` method.
 
         At the moment the queues are checked in order.
 
@@ -189,9 +204,9 @@ class Worker:
                 priority=queues[simple_queue_name][1],
                 register=register,
             )
-        # no olvidar self.update_registry()
+        # remember to call self.update_methods_registry() afterwards
 
-    def update_methods_registry(self):
+    def update_methods_registry(self) -> None:
         queues_to_register = {
             k: v[0]
             for (k, v) in self.requests_queues.items()
@@ -199,21 +214,19 @@ class Worker:
         }
 
         self.connector.register_methods(queues_to_register, self.worker_id)
-    
-    def unregister(self):
-        logger.debug(
-                f"{timestamp()} Worker: {self.worker_id} unregistering."
-            )
+
+    def unregister(self) -> None:
+        logger.debug(f"{timestamp()} Worker: {self.worker_id} unregistering.")
         self.connector.unregister_methods(self.worker_id)
 
-    def close(self):
+    def close(self) -> None:
         """Unregister the worker's public queues and methods. Idempotent."""
         if self._closed:
             return
         self._closed = True
         self.unregister()
 
-    def __enter__(self):
+    def __enter__(self) -> Worker:
         return self
 
     def __exit__(self, exc_type, exc_value, tb):
@@ -227,20 +240,7 @@ class Worker:
         except Exception:
             pass
 
-    def get_reply_to_from_id(self, id):
-        """Returns responses queue name from requests id.
-
-        Args:
-            id (str): Request Message id. With format "{client_id}:num".
-
-        Returns:
-            str: Queue name. "{client_id}_responses".
-
-        """
-        client_id = id.strip().split(":")[0]
-        return self.connector.get_responses_queue(client_id)
-
-    def get_reply_to(self, request):
+    def get_reply_to(self, request: dict) -> str | None:
         """Returns the queue name where response is going to be sent.
 
         Returns the content of the key "reply_to" in request, if it is
@@ -276,14 +276,18 @@ class Worker:
         if "id" in request:
             try:
                 return self.connector.get_reply_to_from_id(request["id"])
-            except:
+            except Exception:
                 return None
 
         return None
 
     def enhance_response(
-        self, response, request, dispatched_to=None, execution_start=None
-    ):
+        self,
+        response: dict,
+        request: dict,
+        dispatched_to: str | None = None,
+        execution_start: float | None = None,
+    ) -> None:
         r = response
         # To be cleaned
         r["reply_to"] = self.get_reply_to(request)
@@ -302,39 +306,64 @@ class Worker:
             r["metadata"]["timing"]["execution_start"] = execution_start
         r["metadata"]["timing"]["execution_finish"] = time()
 
-    def clean_response(self, response):
+    def clean_response(self, response: dict) -> None:
         to_del = ["reply_to", "is_notification", "method"]
         for k in to_del:
             if k in response:
                 del response[k]
 
-    def error(self, code, request, dispatched_to=None, execution_start=None):
+    def error(
+        self,
+        code: int,
+        request: dict,
+        dispatched_to: str | None = None,
+        execution_start: float | None = None,
+    ) -> dict:
         id_ = request.get("id", None)
         e = error_response(code, id=id_, with_trace=self.with_trace)
         self.enhance_response(e, request, dispatched_to, execution_start)
         return e
 
-    def result(self, result, request, dispatched_to=None, execution_start=None):
+    def result(
+        self,
+        result: Any,
+        request: dict,
+        dispatched_to: str | None = None,
+        execution_start: float | None = None,
+    ) -> dict:
         id_ = request.get("id", None)
         r = result_response(result, id=id_)
         self.enhance_response(r, request, dispatched_to, execution_start)
         return r
 
-    def _exec_method_in_queue(self, queue_ref, method, args=[], kwargs={}):
+    def _exec_method_in_queue(
+        self,
+        queue_ref: str,
+        method: str,
+        args: list | None = None,
+        kwargs: dict | None = None,
+    ) -> Any:
+        args = [] if args is None else args
+        kwargs = {} if kwargs is None else kwargs
         funcs = self.requests_queues[queue_ref][0]
-        return funcs[method](*args, **kwargs) 
+        return funcs[method](*args, **kwargs)
 
-
-    def exec_method(self, method, args=[], kwargs={}, queue=None):
+    def exec_method(
+        self,
+        method: str,
+        args: list | None = None,
+        kwargs: dict | None = None,
+        queue: str | None = None,
+    ) -> Any:
         "queue is the simple queue name"
         if queue is not None:
             queue_ref = self.connector.get_requests_queue(queue)
             return self._exec_method_in_queue(queue_ref, method, args, kwargs)
         else:
-            # Aquí voy a meter búsqueda de la cola con el método.
-            raise ValueError(f"queue argument can't be None.")
+            # TO DO: look up the queue that provides the method.
+            raise ValueError("queue argument can't be None.")
 
-    def process_single_request(self, request, dispatched_to):
+    def process_single_request(self, request: dict, dispatched_to: str) -> dict | None:
         """Process a single request.
 
         Args:
@@ -380,7 +409,9 @@ class Worker:
 
         execution_start = time()
         try:
-            result = self._exec_method_in_queue(dispatched_to, request["method"], args, kwargs)
+            result = self._exec_method_in_queue(
+                dispatched_to, request["method"], args, kwargs
+            )
             return self.result(result, request, dispatched_to, execution_start)
 
         except TypeError:
@@ -389,7 +420,9 @@ class Worker:
         except Exception:
             return self.error(-32603, request, dispatched_to, execution_start)
 
-    def process_request(self, request, dispatched_to):
+    def process_request(
+        self, request: dict | list, dispatched_to: str
+    ) -> dict | list | None:
         """Process a request. Could be either a single or a batch request.
 
         Args:
@@ -440,7 +473,7 @@ class Worker:
             )
             return None  # error_response(-32600)
 
-    def shuffled_queues(self):
+    def shuffled_queues(self) -> list:
         tuples = [
             (k, v[1]) for k, v in self.requests_queues.items()
         ]  # [(queue, priority), ...]
@@ -454,7 +487,7 @@ class Worker:
 
         return [value for _, values in sorted_grouped.items() for value in values]
 
-    def run_once(self, timeout=-1):
+    def run_once(self, timeout: float = -1) -> None:
         sorted_queues = self.shuffled_queues()
 
         if len(sorted_queues) == 0:
@@ -476,7 +509,7 @@ class Worker:
             # Deserialize msg
             try:
                 request = self.serializer.loads(msg)
-            except:
+            except Exception:
                 logger.error(
                     f"{timestamp()} Worker: {self.worker_id} Message from queue {dispatched_to} couldn't be deserialized."
                 )
@@ -545,14 +578,14 @@ class Worker:
                 f"{timestamp()} Worker: {self.worker_id} run_once method timeout"
             )
 
-    def run(self, timeout=None):
+    def run(self, timeout: float | None = None) -> None:
+        """Listen and process requests, forever or for `timeout` seconds."""
         if timeout is None or timeout <= -0.00001:
-            forever, time_left = True, -1.0
-        else:
-            t_0 = time()
-            forever, time_left = False, timeout
+            while True:
+                self.run_once(timeout=-1.0)
 
-        while forever or time_left > 0:
+        t_0 = time()
+        time_left = timeout
+        while time_left > 0:
             self.run_once(timeout=time_left)
-            if not forever:
-                time_left = timeout - (time() - t_0)
+            time_left = timeout - (time() - t_0)

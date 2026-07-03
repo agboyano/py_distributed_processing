@@ -1,15 +1,10 @@
 class RemoteException(Exception):
-    def __init__(self, error):
-        self.code = "00000"
-        self.message = "Error no identificado"
-        self.trace = ""
+    """Raised by the client when a response contains an "error" object."""
 
-        if "code" in error:
-            self.code = error["code"]
-        if "message" in error:
-            self.message = error["message"]
-        if "trace" in error:
-            self.trace = error["trace"]
+    def __init__(self, error: dict):
+        self.code = error.get("code", "00000")
+        self.message = error.get("message", "Unidentified error")
+        self.trace = error.get("trace", "")
 
-    def __str__(self):
+    def __str__(self) -> str:
         return f"Error {self.code} : {self.message}\n\n {self.trace}"

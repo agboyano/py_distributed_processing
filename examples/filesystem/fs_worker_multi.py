@@ -4,7 +4,7 @@ from time import sleep
 
 from dotenv import load_dotenv
 
-from distributed_processing.utils import fsnode, fsworker, serialize
+from distributed_processing.utils import fsnode, fsworker
 
 
 def worker1(worker_id):

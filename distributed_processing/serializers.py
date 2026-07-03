@@ -1,17 +1,22 @@
 import json
+from typing import Any
 
 
 class JsonSerializer:
-    def dumps(self, obj):
+    """Serializes messages to/from UTF-8 encoded JSON bytes."""
+
+    def dumps(self, obj: Any) -> bytes:
         return json.dumps(obj).encode("utf8")
 
-    def loads(self, json_str):
-        return json.loads(json_str.decode("utf8"))
+    def loads(self, data: bytes) -> Any:
+        return json.loads(data.decode("utf8"))
 
 
 class DummySerializer:
-    def dumps(self, obj):
+    """Pass-through serializer for connectors that serialize natively."""
+
+    def dumps(self, obj: Any) -> Any:
         return obj
 
-    def loads(self, str):
-        return str
+    def loads(self, data: Any) -> Any:
+        return data

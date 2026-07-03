@@ -1,4 +1,3 @@
-import logging
 from os import getenv
 from time import sleep
 
@@ -78,7 +77,7 @@ def worker1(worker_id=None, watchdog_timeout=60):
 
 
 if __name__ == "__main__":
-    #logging.getLogger("distributed_processing").setLevel(logging.DEBUG)
+    # logging.getLogger("distributed_processing").setLevel(logging.DEBUG)
     load_dotenv()
     NS_PATH = getenv("NS_PATH")
     MASTER_QUEUE = getenv("MASTER_QUEUE")
@@ -91,7 +90,7 @@ if __name__ == "__main__":
         watchdog_timeout=30,
     )
 
-    for i in range(3):
+    for _ in range(3):
         master.exec_method("create_worker", ["worker1", [None, 20]], queue=MASTER_QUEUE)
 
     master.run()
