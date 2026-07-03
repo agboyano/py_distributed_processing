@@ -8,3 +8,10 @@ version = "0.0.1a"
 description = "Computación distribuída."
 requires-python = ">=3.9"
 dependencies = ["redis"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+markers = [
+    "integration: exercises a real connector (filesystem); slower than unit tests",
+]
