@@ -5,9 +5,19 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "distributed-processing"
 version = "0.0.1a"
-description = "Computación distribuída."
+description = "Computación distribuída sobre colas de mensajes (RPC estilo JSON-RPC 2.0 con conectores Redis y filesystem)."
+readme = "README.md"
 requires-python = ">=3.9"
-dependencies = ["redis"]
+# dill is used by the core modules (worker, client) to serialize python calls.
+dependencies = ["dill"]
+
+[project.optional-dependencies]
+redis = ["redis"]
+# fs_structs is a sibling project, not published on PyPI.
+# Install it locally, e.g.: pip install -e ../fs_structs
+fs = ["fs_structs", "watchdog"]
+all = ["distributed-processing[redis,fs]"]
+dev = ["pytest"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
