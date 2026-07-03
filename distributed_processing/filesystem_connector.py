@@ -205,7 +205,7 @@ class FileSystemConnector(object):
 
     def all_queues_for_method(self, method):
         method_set = f"method_queues_{method}"
-        return [x for x in self.registry[method_set]]
+        return list(self.registry.get(method_set, []))
 
     def enqueue(self, queue_name, msg):
         queue = self.namespace.list(queue_name)

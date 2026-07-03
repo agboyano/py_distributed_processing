@@ -66,6 +66,7 @@ class Worker:
         self.worker_id = (
             worker_id if worker_id is not None else self.connector.get_server_id()
         )
+        self._closed = False
         logger.info(f"Worker id: {self.worker_id}")
 
     def add_requests_queue(
@@ -205,8 +206,26 @@ class Worker:
             )
         self.connector.unregister_methods(self.worker_id)
 
-    def __del__(self):
+    def close(self):
+        """Unregister the worker's public queues and methods. Idempotent."""
+        if self._closed:
+            return
+        self._closed = True
         self.unregister()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, tb):
+        self.close()
+
+    def __del__(self):
+        # Best effort: during interpreter shutdown the connector may be
+        # partially torn down. Prefer close() or a `with` block.
+        try:
+            self.close()
+        except Exception:
+            pass
 
     def get_reply_to_from_id(self, id):
         """Returns responses queue name from requests id.
@@ -291,7 +310,7 @@ class Worker:
 
     def error(self, code, request, dispatched_to=None, execution_start=None):
         id_ = request.get("id", None)
-        e = error_response(code, id=id_, with_trace=True)
+        e = error_response(code, id=id_, with_trace=self.with_trace)
         self.enhance_response(e, request, dispatched_to, execution_start)
         return e
 
@@ -367,8 +386,8 @@ class Worker:
         except TypeError:
             return self.error(-32602, request, dispatched_to, execution_start)
 
-        except:
-            return self.error(-3260, request, dispatched_to, execution_start)
+        except Exception:
+            return self.error(-32603, request, dispatched_to, execution_start)
 
     def process_request(self, request, dispatched_to):
         """Process a request. Could be either a single or a batch request.
@@ -459,7 +478,7 @@ class Worker:
                 request = self.serializer.loads(msg)
             except:
                 logger.error(
-                    f"{timestamp} Worker: {self.worker_id} Message from queue {dispatched_to} couldn't be deserialized."
+                    f"{timestamp()} Worker: {self.worker_id} Message from queue {dispatched_to} couldn't be deserialized."
                 )
                 return
 
@@ -507,7 +526,7 @@ class Worker:
                         logger.debug(
                             f"{timestamp()} Worker: {self.worker_id} Appending {rtype} response with id: {id_} for method: {method} from Batch Request from queue: {dispatched_to}"
                         )
-                        self.clean_response(processed)
+                        self.clean_response(one_single_response)
                         batch.setdefault(reply_to, []).append(one_single_response)
                     else:
                         logger.debug(
@@ -528,12 +547,12 @@ class Worker:
 
     def run(self, timeout=None):
         if timeout is None or timeout <= -0.00001:
-            forever, timeout = True, -1.0
+            forever, time_left = True, -1.0
         else:
             t_0 = time()
             forever, time_left = False, timeout
 
         while forever or time_left > 0:
-            self.run_once(timeout=timeout)
+            self.run_once(timeout=time_left)
             if not forever:
-                time_left = timeout - (time.time() - t_0)
+                time_left = timeout - (time() - t_0)

@@ -191,73 +191,83 @@ class AsyncResult(object):
 def gather(fs, timeout=None, step=5, max_dt=30):
     """Gathers all AsyncResults in the list.
 
+    Assumes all requests were sent by the same client. If no progress is
+    made for a while (relative to the longest observed execution time),
+    requests that look lost are retried once (only those created with
+    retry info, see `Client.rpc_async(retry=True)`).
+
     Args:
+        fs (list): List of AsyncResult objects.
         timeout (int, float, optional): Timeout in seconds. Maximum waiting time.
             Defaults to None. If None, unlimited waiting time.
         step (int, float): Step time in seconds. Defaults to 5 secs.
         max_dt (int, float): Max delta time to retry a request.
 
     Returns:
-        bool: True if the request has been retried, False if not (request already received).
+        bool: True if all responses were received, False if timeout.
     """
 
     def ar_indices_to_retry(fs):
-        done = [(f.queue, (i, f.ok() or f.failed())) for i, f in enumerate(fs)]
+        # Queues are FIFO: if a request older than the last completed one
+        # in the same queue is still pending, it was probably lost.
+        by_queue = {}
+        for i, f in enumerate(fs):
+            by_queue.setdefault(f.queue, []).append((i, f.done()))
 
-        d = {}
-        for x in done:
-            d.setdefault(x[0], []).append(x[1])
+        indices = []
+        for entries in by_queue.values():
+            last_done = -1
+            for pos, (_, done) in enumerate(entries):
+                if done:
+                    last_done = pos
+            for i, done in entries[: last_done + 1]:
+                if not done:
+                    indices.append(i)
 
-        salida = []
-        for k, l in d.items():
-            for i in range(len(l) - 1, 0, -1):
-                if l[i][1]:
-                    break
-            for i in range(0, i):
-                if not l[i]:
-                    salida.append((k, i))
-
-        return [x[1] for x in salida]
+        return indices
 
     _ = [f.status for f in fs]
     # AsyncResults sorted by creation_time
-    fs = [x[0] for x in sorted([(f, f.creation_time) for f in fs], key=lambda x: x[1])]
+    fs = sorted(fs, key=lambda f: f.creation_time)
 
     N = len(fs)
     t_0 = time()
-    last_time = t_0
+    last_progress = t_0
     i = 0
     N_pending = N
     max_dt_real = max_dt
-    s = 0
     retried = set()
-    while (time() - t_0) <= timeout:
-        pending_ars = [ar for ar in fs if not (ar.ok() or ar.failed())]
+    while timeout is None or (time() - t_0) <= timeout:
+        pending_ars = [ar for ar in fs if not ar.done()]
         pending_ids = [ar.id for ar in pending_ars]
+
+        if len(pending_ars) == 0:
+            return True
 
         if len(pending_ars) < N_pending:
             N_pending = len(pending_ars)
-            last_time = time()
-            s = 0
+            last_progress = time()
 
         dts = [
             f.metadata["timing"]["execution_finish"]
             - f.metadata["timing"]["execution_start"]
             for f in fs
-            if f.metadata != {} and (f.ok() or f.failed())
+            if f.done()
+            and "execution_start" in f.metadata.get("timing", {})
+            and "execution_finish" in f.metadata.get("timing", {})
         ]
 
         if len(dts) > 0:
             max_dt_real = max(max(dts), max_dt)
 
-        if (time() - last_time) > 2 * max_dt_real:
+        if (time() - last_progress) > 2 * max_dt_real:
             for ix in ar_indices_to_retry(fs):
-                if ix not in retried:
+                if ix not in retried and fs[ix].request is not None:
                     fs[ix].retry()
                     retried.add(ix)
-                logger.debug(f"Retrying request with id: {fs[ix].id}")
+                    logger.debug(f"Retrying request with id: {fs[ix].id}")
             logger.warning(
-                f"{s} It looks like there are not workers on the other side."
+                "gather: no progress for a while. It looks like there are no workers on the other side."
             )
 
         logger.debug(
@@ -267,13 +277,13 @@ def gather(fs, timeout=None, step=5, max_dt=30):
         try:
             if (
                 fs[0]._client.wait_responses(pending_ids, timeout=step) == []
-            ):  # asume all request were sent bay the same client
-                return
+            ):  # assumes all requests were sent by the same client
+                return True
         except TimeoutError:
             pass
 
         _ = [f.status for f in fs]
 
-        [(f.ok() or f.failed(), f.queue) for f in fs]
-
         i += 1
+
+    return False

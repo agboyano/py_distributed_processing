@@ -135,9 +135,9 @@ class Client:
         queues = r["methods"][method]
         ws = set()
         for q in queues:
-            ws = sorted(list(ws.union(set(r["workers"][q]))))
+            ws = ws.union(set(r["workers"].get(q, [])))
 
-        return ws
+        return sorted(ws)
 
     def _select_queue_ref(self, method):
         """Selects a queue where the request with the method is going to be sent.
@@ -254,7 +254,9 @@ class Client:
             f"{timestamp()} Client: {self.client_id} sent request with id: {id_} to queue: {queue_ref}"
         )
 
-        self.pending[id_] = time.time()
+        # Notifications have no id and expect no response: nothing to track.
+        if id_ is not None:
+            self.pending[id_] = time.time()
         return id_, self.simple_queue_name(queue_ref)
 
     def send_batch_request(
@@ -284,9 +286,14 @@ class Client:
                 in the list of common queues.
 
         """
+        if len(requests_lst) == 0:
+            raise ValueError("Empty batch request.")
+
         queue_refs_sets = [set(self._all_queue_refs_for_method(x[0])) for x in requests_lst]
 
-        requests_queue_refs = list(set.union(*queue_refs_sets))
+        # The batch is processed by a single worker, so the target queue
+        # must be available for every method in the batch.
+        requests_queue_refs = list(set.intersection(*queue_refs_sets))
 
         if len(requests_queue_refs) == 0:
             raise ValueError("No common queue for batch request.")
@@ -298,10 +305,7 @@ class Client:
                     f"{queue} not in common available queues for batch request."
                 )
         else:
-            if len(requests_queue_refs) >0:
-                queue_ref = random.choice(requests_queue_refs)
-            else:
-                queue_ref = self.default_queue_ref
+            queue_ref = random.choice(requests_queue_refs)
 
         reply_to = None if not self.use_reply_to else self.responses_queue
 
@@ -393,6 +397,7 @@ class Client:
                         f"{timestamp()} Client: {self.client_id} received a Single {'RESULT' if 'error' not in r else 'ERROR'} with id: {r['id']}"
                     )
                 else:
+                    no_id.append(r)
                     logger.debug(
                         f"{timestamp()} Client: {self.client_id} received a Single Notification"
                     )
@@ -422,8 +427,8 @@ class Client:
             raw_responses
         )
         self.responses.update(responses_dict)
-        self.notifications.append(no_id)
-        self.responses_parse_errors.append(parse_errors)
+        self.notifications.extend(no_id)
+        self.responses_parse_errors.extend(parse_errors)
         self.acks.update(acks_dict)
         pending = [k for k in self.pending.keys()]
         for id in pending:

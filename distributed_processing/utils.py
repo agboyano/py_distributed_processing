@@ -19,19 +19,19 @@ logger = logging.getLogger(__name__)
 
 
 def fsclient(
-    NS_PATH, check_registry="Cache", with_watchdog=True, pop_watchdog_timeout=10
+    NS_PATH, check_registry="cache", with_watchdog=True, pop_watchdog_timeout=10
 ):
     fs_connector = FileSystemConnector(NS_PATH)
-    fs_connector.with_watchdog = True
-    fs_connector.pop_watchdog_timeout = 10
-    return Client(DummySerializer(), fs_connector, check_registry="cache")
+    fs_connector.with_watchdog = with_watchdog
+    fs_connector.pop_watchdog_timeout = pop_watchdog_timeout
+    return Client(DummySerializer(), fs_connector, check_registry=check_registry)
 
 
 def fsworker(
     NS_PATH, clean=False, with_watchdog=True, worker_id=None, watchdog_timeout=60
 ):
     fs_connector = FileSystemConnector(NS_PATH)
-    fs_connector.with_watchdog = True
+    fs_connector.with_watchdog = with_watchdog
     fs_connector.pop_watchdog_timeout = watchdog_timeout
     if clean:
         fs_connector.clean_namespace()
@@ -67,7 +67,6 @@ def fsnode(
         "WorkerProcess", ["p", "pid", "worker_type", "worker_id"]
     )
     processes = []
-    workers_constructors = workers_constructors
     manager = mp.Manager()
     active_workers = manager.dict()
 
@@ -129,7 +128,12 @@ def fsnode(
         ):
             sleep(0.1)
         if id not in active_workers:
-            kill_process(p.pid)
+            # The process never registered itself: it is not in `processes`
+            # yet, so terminate it directly instead of using kill_process.
+            p.terminate()
+            p.join(timeout=30)
+            if p.is_alive():
+                p.kill()
             return None, None, None
         wp = WorkerProcess(p, p.pid, worker_type, active_workers.get(id, "error"))
         processes.append(wp)
@@ -150,7 +154,11 @@ def fsnode(
     }
 
     master = fsworker(
-        NS_PATH, clean=clean, worker_id=worker_id, watchdog_timeout=watchdog_timeout
+        NS_PATH,
+        clean=clean,
+        with_watchdog=with_watchdog,
+        worker_id=worker_id,
+        watchdog_timeout=watchdog_timeout,
     )
     master.add_requests_queue(master.worker_id, master_funcs)
     master.update_methods_registry()
