@@ -1,1 +1,0 @@
-pytest --nbval-lax
