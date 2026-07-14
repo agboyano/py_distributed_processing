@@ -121,6 +121,38 @@ class RedisConnector:
             queue_set = f"{self.namespace}:workers_queue:{queue_name}"
             self.connection.sadd(queue_set, worker_id)
 
+    def unregister_methods(self, worker_id: str) -> None:
+        """Removes a worker from the registry.
+
+        Queues without remaining workers, and methods without remaining
+        queues, are deleted from the registry (redis deletes empty sets
+        automatically).
+        """
+        empty_queues = []
+        for queue_set in self.connection.scan_iter(f"{self.namespace}:workers_queue:*"):
+            removed = self.connection.srem(queue_set, worker_id)
+            if removed and not self.connection.exists(queue_set):
+                queue_ref = queue_set.decode("utf8").removeprefix(
+                    f"{self.namespace}:workers_queue:"
+                )
+                empty_queues.append(queue_ref)
+                logger.info(
+                    f"Queue {queue_ref} has no remaining public workers listening. {worker_id} unregistered."
+                )
+
+        if len(empty_queues) == 0:
+            return
+
+        for method_set in self.connection.scan_iter(
+            f"{self.namespace}:method_queues:*"
+        ):
+            removed = self.connection.srem(method_set, *empty_queues)
+            if removed and not self.connection.exists(method_set):
+                method = method_set.decode("utf8").split(":")[-1]
+                logger.info(
+                    f"Method {method} has no remaining public queues listening. Unregistered."
+                )
+
     def random_queue_for_method(self, method: str) -> str | None:
         "Returns a random queue ref serving `method`, or None if there is none."
         available = self.all_queues_for_method(method)
