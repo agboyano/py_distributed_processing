@@ -1,45 +1,46 @@
 # distributed-processing
 
-Librería ligera de computación distribuida sobre colas de mensajes, con un
-protocolo RPC inspirado en [JSON-RPC 2.0](https://www.jsonrpc.org/specification).
+Lightweight distributed computing library on top of message queues, with an
+RPC protocol inspired by [JSON-RPC 2.0](https://www.jsonrpc.org/specification).
 
-Un **worker** registra funciones y escucha en una o varias colas de peticiones;
-un **cliente** descubre qué métodos hay disponibles (registro), envía peticiones
-y recoge las respuestas de forma síncrona o asíncrona (`AsyncResult`). El
-transporte es intercambiable mediante **conectores**: Redis o sistema de
-ficheros compartido (NFS, disco local, etc.).
+A **worker** registers functions and listens on one or more request queues;
+a **client** discovers which methods are available (registry), sends requests
+and collects responses synchronously or asynchronously (`AsyncResult`). The
+transport is pluggable via **connectors**: Redis or a shared filesystem
+(NFS, local disk, etc.).
 
-## Características
+## Features
 
-- RPC síncrono y asíncrono (`rpc_sync`, `rpc_async`, `AsyncResult`).
-- Peticiones batch (un solo mensaje, un solo worker) y multi (repartidas entre
-  workers): `rpc_batch_*`, `rpc_multi_*`.
-- Registro de métodos: los clientes descubren qué colas sirven cada método
-  (`check_registry="cache" | "always" | otro`).
-- Colas con prioridades; las de igual prioridad se barajan en cada iteración.
-- Notificaciones (peticiones sin respuesta), acks opcionales y reintentos
+- Synchronous and asynchronous RPC (`rpc_sync`, `rpc_async`, `AsyncResult`).
+- Batch requests (a single message, a single worker) and multi requests
+  (spread across workers): `rpc_batch_*`, `rpc_multi_*`.
+- Method registry: clients discover which queues serve each method
+  (`check_registry="cache" | "always" | other`).
+- Queues with priorities; queues of equal priority are shuffled on each
+  iteration.
+- Notifications (requests without a response), optional acks and retries
   (`AsyncResult.retry`, `gather`).
-- Envío de funciones Python arbitrarias serializadas con `dill`
-  (`rpc_async_fn` + `Worker.add_python_eval`). **Ver nota de seguridad.**
-- Conectores: Redis (`RedisConnector`) y sistema de ficheros
-  (`FileSystemConnector`, basado en `fs_structs`, con espera por eventos
-  de watchdog o polling).
+- Sending arbitrary Python functions serialized with `dill`
+  (`rpc_async_fn` + `Worker.add_python_eval`). **See security note.**
+- Connectors: Redis (`RedisConnector`) and filesystem
+  (`FileSystemConnector`, based on `fs_structs`, waiting on watchdog
+  events or polling).
 
-## Instalación
+## Installation
 
 ```bash
-pip install .              # núcleo (dill)
-pip install .[redis]       # + conector Redis
-pip install .[fs]          # + conector de sistema de ficheros (fs_structs, watchdog)
+pip install .              # core (dill)
+pip install .[redis]       # + Redis connector
+pip install .[fs]          # + filesystem connector (fs_structs, watchdog)
 pip install .[dev]         # + pytest
 ```
 
-`fs_structs` es un proyecto hermano no publicado en PyPI; instálalo en local,
-por ejemplo: `pip install -e ../fs_structs`.
+`fs_structs` is a sibling project not published on PyPI; install it locally,
+for example: `pip install -e ../fs_structs`.
 
-## Uso rápido
+## Quick start
 
-Worker (un proceso):
+Worker (one process):
 
 ```python
 from distributed_processing import Worker, JsonSerializer
@@ -49,12 +50,12 @@ def add(a, b):
     return a + b
 
 worker = Worker(JsonSerializer(), RedisConnector("localhost"))
-worker.add_requests_queue("mi_cola", {"add": add})
+worker.add_requests_queue("my_queue", {"add": add})
 worker.update_methods_registry()
-worker.run()          # escucha indefinidamente; run(timeout=60) para acotar
+worker.run()          # listens indefinitely; run(timeout=60) to bound it
 ```
 
-Cliente (otro proceso):
+Client (another process):
 
 ```python
 from distributed_processing import Client, JsonSerializer
@@ -62,72 +63,72 @@ from distributed_processing.redis_connector import RedisConnector
 
 client = Client(JsonSerializer(), RedisConnector("localhost"))
 
-client.rpc_sync("add", [1, 2])          # → 3, bloqueante
+client.rpc_sync("add", [1, 2])          # → 3, blocking
 
 f = client.rpc_async("add", [20, 22])   # AsyncResult
 f.get(timeout=10)                       # → 42
 
 fs = client.rpc_multi_async([("add", [i, i], None) for i in range(100)])
-[f.safe_get(timeout=60) for f in fs]    # repartido entre los workers
+[f.safe_get(timeout=60) for f in fs]    # spread across the workers
 ```
 
-Con el conector de sistema de ficheros basta con compartir un directorio:
+With the filesystem connector you only need to share a directory:
 
 ```python
 from distributed_processing.utils import fsworker, fsclient
 
-worker = fsworker("/ruta/compartida/ns")   # + add_requests_queue + run()
-client = fsclient("/ruta/compartida/ns")
+worker = fsworker("/shared/path/ns")   # + add_requests_queue + run()
+client = fsclient("/shared/path/ns")
 ```
 
-Para lanzar un nodo con varios workers en subprocesos gestionados remotamente
-(crear/listar/matar workers vía RPC), ver `distributed_processing.utils.fsnode`.
+To launch a node with several workers in remotely managed subprocesses
+(create/list/kill workers via RPC), see `distributed_processing.utils.fsnode`.
 
-## Nota de seguridad
+## Security note
 
-`Worker.add_python_eval()` expone `eval_py_function`, que deserializa con
-`dill` y **ejecuta código Python arbitrario** enviado por los clientes
-(es lo que usa `rpc_async_fn`). Cualquiera con acceso de escritura a las colas
-(el servidor Redis o el directorio compartido) puede ejecutar código en los
-workers. Úsalo únicamente en infraestructura de confianza y no expongas el
-transporte a redes no confiables.
+`Worker.add_python_eval()` exposes `eval_py_function`, which deserializes with
+`dill` and **executes arbitrary Python code** sent by clients (this is what
+`rpc_async_fn` uses). Anyone with write access to the queues (the Redis
+server or the shared directory) can execute code on the workers. Use it only
+on trusted infrastructure and do not expose the transport to untrusted
+networks.
 
-## Protocolo
+## Protocol
 
-Mensajes estilo JSON-RPC 2.0 con extensiones: `reply_to` (cola de respuesta),
-`ack` (confirmación de recepción), `is_notification`, `options` y `timing`/
-`metadata` (worker, cola, tiempos de ejecución). Códigos de error estándar:
-`-32600` petición inválida, `-32601` método no encontrado, `-32602` parámetros
-inválidos, `-32603` error interno (incluye la traza remota si el worker se
-crea con `with_trace=True`).
+JSON-RPC 2.0-style messages with extensions: `reply_to` (response queue),
+`ack` (receipt confirmation), `is_notification`, `options` and `timing`/
+`metadata` (worker, queue, execution times). Standard error codes:
+`-32600` invalid request, `-32601` method not found, `-32602` invalid
+params, `-32603` internal error (includes the remote traceback if the worker
+is created with `with_trace=True`).
 
-## Tests y calidad
+## Tests and quality
 
 ```bash
-pytest                       # suite completa (~2 s)
-pytest -m "not integration"  # solo unitarios (sin tocar el filesystem)
+pytest                       # full suite (~2 s)
+pytest -m "not integration"  # unit tests only (no filesystem access)
 ruff check distributed_processing tests   # lint
-ruff format distributed_processing tests  # formateo
+ruff format distributed_processing tests  # formatting
 ```
 
-Los tests unitarios usan un conector en memoria (`tests/conftest.py`), sin
-necesidad de Redis ni de un directorio compartido. La CI (GitHub Actions)
-ejecuta lint + tests en Python 3.9–3.13.
+Unit tests use an in-memory connector (`tests/conftest.py`), with no need
+for Redis or a shared directory. CI (GitHub Actions) runs lint + tests on
+Python 3.9–3.13.
 
-## Estructura
+## Layout
 
 ```
 distributed_processing/
-├── client.py                # Client: envío de peticiones, caché de respuestas
-├── worker.py                # Worker: colas, despacho y ejecución de métodos
-├── async_result.py          # AsyncResult y gather()
-├── messages.py              # construcción y validación de mensajes
+├── client.py                # Client: request sending, response cache
+├── worker.py                # Worker: queues, dispatch and method execution
+├── async_result.py          # AsyncResult and gather()
+├── messages.py              # message construction and validation
 ├── serializers.py           # JsonSerializer, DummySerializer
-├── redis_connector.py       # transporte Redis
-├── filesystem_connector.py  # transporte por sistema de ficheros (fs_structs)
+├── redis_connector.py       # Redis transport
+├── filesystem_connector.py  # filesystem transport (fs_structs)
 ├── exceptions.py            # RemoteException
-└── utils.py                 # fsworker/fsclient/fsnode (helpers filesystem)
+└── utils.py                 # fsworker/fsclient/fsnode (filesystem helpers)
 ```
 
-En `examples/` hay notebooks de uso (filesystem, Redis y un caso real de
-Monte Carlo para autocallables).
+`examples/` contains usage notebooks (filesystem, Redis, and a real
+Monte Carlo case for autocallables).
