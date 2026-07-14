@@ -21,6 +21,23 @@ CLEANED = "CLEANED"
 
 
 class AsyncResult:
+    """Handle for the pending response of an asynchronous request.
+
+    Returned by the `rpc_*_async` methods of `Client`. The result is
+    obtained with `get`/`safe_get` and the state ('PENDING', 'OK' or
+    'FAILED') is available in the `status` property.
+
+    Args:
+        rpc_client (Client): Client that sent the request.
+        id (str): Id of the request.
+        request (tuple, optional): (method, args, kwargs) retry info, only
+            set when the request was sent with `retry=True` (see `retry`).
+            Defaults to None.
+        queue (str, optional): Simple name of the queue where the request
+            was sent. Defaults to None.
+
+    """
+
     def __init__(
         self,
         rpc_client,
@@ -41,12 +58,15 @@ class AsyncResult:
         self.metadata: dict = {}
 
     def ok(self) -> bool:
+        "Returns True if the state of the AsyncResult object is 'OK'."
         return self.status == OK
 
     def failed(self) -> bool:
+        "Returns True if the state of the AsyncResult object is 'FAILED'."
         return self.status == FAILED
 
     def done(self) -> bool:
+        "Returns True if a response was received ('OK' or 'FAILED')."
         return self.ok() or self.failed()
 
     def pending(self) -> bool:
@@ -157,6 +177,20 @@ class AsyncResult:
         clean: bool = True,
         default: Any = None,
     ) -> Any:
+        """Like `get`, but returns `default` instead of raising.
+
+        Args:
+            timeout (float, optional): Defaults to None (rpc_client.timeout).
+                If 0, check queue once.
+            clean (bool, optional): If True remove the result from cache.
+                Defaults to True.
+            default: Value to return on timeout or remote error.
+                Defaults to None.
+
+        Returns:
+            result, or `default` on any exception.
+
+        """
         try:
             return self.get(timeout, clean=clean)
         except Exception:
@@ -175,6 +209,10 @@ class AsyncResult:
 
         Returns:
             bool: True if the request has been retried, False if not (request already received).
+
+        Raises:
+            ValueError: If the AsyncResult was created without retry info
+                (see `Client.rpc_async(retry=True)`).
 
         """
         if self.request is None:

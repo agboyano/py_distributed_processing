@@ -27,6 +27,24 @@ def fsclient(
     with_watchdog: bool = True,
     pop_watchdog_timeout: float = 10,
 ) -> Client:
+    """Builds a Client on a filesystem namespace.
+
+    Convenience constructor for
+    `Client(DummySerializer(), FileSystemConnector(NS_PATH))`.
+
+    Args:
+        NS_PATH (str): Directory shared by clients and workers.
+        check_registry (str): Queue selection mode ('cache', 'always' or
+            other, see `Client`). Defaults to 'cache'.
+        with_watchdog (bool): If True, blocking pops wait for filesystem
+            events; if False, they poll. Defaults to True.
+        pop_watchdog_timeout (float): Seconds to wait for a file event
+            before re-checking the queue. Defaults to 10.
+
+    Returns:
+        Client
+
+    """
     fs_connector = FileSystemConnector(NS_PATH)
     fs_connector.with_watchdog = with_watchdog
     fs_connector.pop_watchdog_timeout = pop_watchdog_timeout
@@ -40,6 +58,28 @@ def fsworker(
     worker_id: str | None = None,
     watchdog_timeout: float = 60,
 ) -> Worker:
+    """Builds a Worker on a filesystem namespace.
+
+    Convenience constructor for
+    `Worker(DummySerializer(), FileSystemConnector(NS_PATH))`. Remember to
+    call `add_requests_queue`, `update_methods_registry` and `run` on the
+    returned Worker.
+
+    Args:
+        NS_PATH (str): Directory shared by clients and workers.
+        clean (bool): If True, wipe the namespace (queues and registry)
+            before starting. Defaults to False.
+        with_watchdog (bool): If True, blocking pops wait for filesystem
+            events; if False, they poll. Defaults to True.
+        worker_id (str, optional): Worker identifier. Defaults to None
+            (a new one is generated).
+        watchdog_timeout (float): Seconds to wait for a file event before
+            re-checking the queues. Defaults to 60.
+
+    Returns:
+        Worker
+
+    """
     fs_connector = FileSystemConnector(NS_PATH)
     fs_connector.with_watchdog = with_watchdog
     fs_connector.pop_watchdog_timeout = watchdog_timeout
@@ -50,10 +90,12 @@ def fsworker(
 
 
 def serialize(x: Any) -> bytes:
+    "Serializes any python object with dill."
     return dill.dumps(x)
 
 
 def deserialize(x: bytes) -> Any:
+    "Deserializes a dill-serialized python object."
     return dill.loads(x)
 
 
@@ -73,6 +115,49 @@ def fsnode(
     watchdog_timeout: float = 60,
     creation_processes_timeout: float = 60,
 ) -> Worker:
+    """Builds a node: a master Worker that manages workers in subprocesses.
+
+    The returned master Worker listens on a queue named after its
+    `worker_id` and exposes these methods, callable remotely via RPC:
+
+    - `create_worker(worker_type, args, kwargs)`: starts a new subprocess
+      running `workers_constructors[worker_type](*args, **kwargs).run()`.
+      Returns (pid, worker_type, worker_id), or (None, None, None) if the
+      worker did not start within `creation_processes_timeout`.
+    - `list_processes()`: returns [(pid, worker_type, worker_id), ...] of
+      the alive worker subprocesses.
+    - `kill_process(pid)` / `kill_processes(pids)`: terminates worker
+      subprocesses and unregisters their methods.
+    - `kill_all_processes()`: terminates every worker subprocess.
+    - `cleanup()`: kills all the workers and unregisters the master.
+      Also registered with `atexit`.
+
+    The caller must call `run()` on the returned master Worker to start
+    serving these methods.
+
+    Args:
+        NS_PATH (str): Directory shared by clients and workers.
+        clean (bool): If True, wipe the namespace (queues and registry)
+            before starting. Defaults to False.
+        with_watchdog (bool): If True, blocking pops wait for filesystem
+            events; if False, they poll. Defaults to True.
+        worker_id (str, optional): Master worker identifier (and simple
+            name of its requests queue). Defaults to None (a new one is
+            generated).
+        workers_constructors (dict, optional): {worker_type: constructor}
+            with the constructors (callables returning a Worker) that
+            `create_worker` can launch. They are dill-serialized into the
+            subprocesses. Defaults to None ({}).
+        watchdog_timeout (float): Seconds to wait for a file event before
+            re-checking the queues. Defaults to 60.
+        creation_processes_timeout (float): Maximum seconds to wait for a
+            new worker subprocess to register itself. Defaults to 60.
+
+    Returns:
+        Worker: The master Worker, already registered. Call its `run`
+            method to start serving.
+
+    """
     workers_constructors = {} if workers_constructors is None else workers_constructors
     WorkerProcess = namedtuple(
         "WorkerProcess", ["p", "pid", "worker_type", "worker_id"]

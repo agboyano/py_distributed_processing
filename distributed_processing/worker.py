@@ -37,6 +37,30 @@ def eval_py_function(
 
 
 class Worker:
+    """Listens on requests queues, executes registered functions and responds.
+
+    Queues are added with `add_requests_queue`/`add_function` and made public
+    with `update_methods_registry`. `run` (or `run_once`) pops requests from
+    the queues in priority order and sends the responses back through the
+    connector. Use `close()` or a `with` block to unregister the worker's
+    public queues and methods on shutdown.
+
+    Args:
+        serializer: Object with `dumps`/`loads` methods used to serialize
+            messages (e.g. `JsonSerializer`, `DummySerializer`).
+        connector: Transport instance (e.g. `RedisConnector`,
+            `FileSystemConnector`).
+        worker_id (str, optional): Worker identifier. Defaults to None.
+            If None, a new one is requested to the connector.
+        with_trace (bool): If True, error responses include the remote
+            traceback in the "trace" key of the error object.
+            Defaults to True.
+        reply_to_default (str, optional): Default response queue, only used
+            when the incoming request has no `reply_to` key. Defaults to
+            None (derive the response queue from the request `id`).
+
+    """
+
     def __init__(
         self,
         serializer,
@@ -207,6 +231,7 @@ class Worker:
         # remember to call self.update_methods_registry() afterwards
 
     def update_methods_registry(self) -> None:
+        "Publishes the queues and methods added with `register=True`."
         queues_to_register = {
             k: v[0]
             for (k, v) in self.requests_queues.items()
@@ -216,6 +241,7 @@ class Worker:
         self.connector.register_methods(queues_to_register, self.worker_id)
 
     def unregister(self) -> None:
+        "Removes the worker's queues and methods from the public registry."
         logger.debug(f"{timestamp()} Worker: {self.worker_id} unregistering.")
         self.connector.unregister_methods(self.worker_id)
 
@@ -288,6 +314,22 @@ class Worker:
         dispatched_to: str | None = None,
         execution_start: float | None = None,
     ) -> None:
+        """Annotates a response dict with routing info and metadata.
+
+        Adds the temporary keys `reply_to`, `is_notification` and `method`
+        (used for routing and removed by `clean_response` before sending)
+        and the `metadata` key (worker, queue, method and timing) that is
+        sent with the response.
+
+        Args:
+            response (dict): Response dict to annotate (modified in place).
+            request (dict): Request being answered.
+            dispatched_to (str, optional): Queue where the request was
+                received. Defaults to None.
+            execution_start (float, optional): time() when the method
+                execution started. Defaults to None.
+
+        """
         r = response
         # To be cleaned
         r["reply_to"] = self.get_reply_to(request)
@@ -307,6 +349,7 @@ class Worker:
         r["metadata"]["timing"]["execution_finish"] = time()
 
     def clean_response(self, response: dict) -> None:
+        "Removes the temporary routing keys added by `enhance_response`."
         to_del = ["reply_to", "is_notification", "method"]
         for k in to_del:
             if k in response:
@@ -319,6 +362,7 @@ class Worker:
         dispatched_to: str | None = None,
         execution_start: float | None = None,
     ) -> dict:
+        "Builds an annotated error response for `request` (see `enhance_response`)."
         id_ = request.get("id", None)
         e = error_response(code, id=id_, with_trace=self.with_trace)
         self.enhance_response(e, request, dispatched_to, execution_start)
@@ -331,6 +375,7 @@ class Worker:
         dispatched_to: str | None = None,
         execution_start: float | None = None,
     ) -> dict:
+        "Builds an annotated result response for `request` (see `enhance_response`)."
         id_ = request.get("id", None)
         r = result_response(result, id=id_)
         self.enhance_response(r, request, dispatched_to, execution_start)
@@ -355,7 +400,22 @@ class Worker:
         kwargs: dict | None = None,
         queue: str | None = None,
     ) -> Any:
-        "queue is the simple queue name"
+        """Executes a registered method locally (without messages).
+
+        Args:
+            method (str): Name of a method registered in `queue`.
+            args (list, optional): Positional args. Defaults to None.
+            kwargs (dict, optional): Named args. Defaults to None.
+            queue (str, optional): Simple name of the queue that provides
+                the method. Currently required.
+
+        Returns:
+            Result of the method call.
+
+        Raises:
+            ValueError: If `queue` is None.
+
+        """
         if queue is not None:
             queue_ref = self.connector.get_requests_queue(queue)
             return self._exec_method_in_queue(queue_ref, method, args, kwargs)
@@ -426,7 +486,8 @@ class Worker:
         """Process a request. Could be either a single or a batch request.
 
         Args:
-            msg: Serialized request message. Could be a batch request.
+            request (dict or list): Deserialized request. Either a single
+                request (dict) or a batch request (list of dicts).
             dispatched_to (str): Queue where the request was received.
                 The sole purpose of dispatched_to is to carry the value
                 of the queue where the request was received for logging
@@ -474,6 +535,10 @@ class Worker:
             return None  # error_response(-32600)
 
     def shuffled_queues(self) -> list:
+        """Returns the queue refs sorted by priority (highest first).
+
+        Queues with the same priority are shuffled on every call.
+        """
         tuples = [
             (k, v[1]) for k, v in self.requests_queues.items()
         ]  # [(queue, priority), ...]
@@ -488,6 +553,20 @@ class Worker:
         return [value for _, values in sorted_grouped.items() for value in values]
 
     def run_once(self, timeout: float = -1) -> None:
+        """Pops one request (single or batch) and processes it.
+
+        Waits on all the worker's queues in priority order, processes the
+        first available request and sends the response(s), unless they are
+        notifications.
+
+        Args:
+            timeout (float): Maximum wait time in seconds. Defaults to -1
+                (< 0 waits indefinitely).
+
+        Raises:
+            ValueError: If the worker has no queues to listen.
+
+        """
         sorted_queues = self.shuffled_queues()
 
         if len(sorted_queues) == 0:

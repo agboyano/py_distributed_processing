@@ -9,6 +9,7 @@ import fs_structs
 
 
 def sleep(a: float, b: float | None = None) -> None:
+    "Sleeps `a` seconds, or a uniform random time in [a, b] if `b` is given."
     if b is None:
         time.sleep(a)
     else:
@@ -19,6 +20,44 @@ logger = logging.getLogger(__name__)
 
 
 class FileSystemConnector:
+    """Transport on a shared directory (NFS, local disk, ...) via `fs_structs`.
+
+    Queues are `fs_structs` lists and the registry is a `fs_structs` dict,
+    all under an `FSNamespace` rooted at `base_path`. Blocking pops wait for
+    filesystem events (watchdog) or poll, depending on `with_watchdog`.
+
+    Args:
+        base_path (str): Directory shared by clients and workers.
+        temp_dir (str, optional): Temporary directory used by the
+            namespace for atomic writes. Defaults to None.
+        serializer: `fs_structs` serializer used to store the values.
+            Defaults to `fs_structs.structs.joblib_serializer`.
+
+    Attributes:
+        with_watchdog (bool): If True (default), blocking pops wait for
+            file-creation events; if False, they poll.
+        pop_sleep (tuple): (min, max) seconds of the uniform random polling
+            delay. Only used when `with_watchdog` is False.
+        pop_watchdog_timeout (float): Seconds to wait for a file event
+            before re-checking the queue.
+        pop_sleep_watchdog (tuple): (min, max) seconds of the uniform
+            random wait after a file event, to minimize the probability of
+            race conditions.
+        lock_pop_timeout (float): Seconds to wait for the queue lock in
+            `pop_multiple`.
+        lock_pop_watchdog_timeout (float): Seconds to wait for a file event
+            while waiting for the queue lock.
+        lock_pop_wait (tuple): (min, max) seconds of the uniform random
+            wait between queue lock attempts.
+        registry_timeout (float): Seconds to wait for registry reads.
+        lock_registry_timeout (float): Seconds to wait for the registry lock.
+        lock_registry_watchdog_timeout (float): Seconds to wait for a file
+            event while waiting for the registry lock.
+        lock_registry_wait (tuple): (min, max) seconds of the uniform
+            random wait between registry lock attempts.
+
+    """
+
     def __init__(
         self,
         base_path: str,
@@ -51,18 +90,23 @@ class FileSystemConnector:
         self.registry = self.namespace.udict("registry")
 
     def get_requests_queue(self, queue_name: str) -> str:
+        "Returns the requests queue reference for a simple queue name."
         return f"requests_{queue_name}"
 
     def requests_queue_name(self, queue_ref: str) -> str:
+        "Returns the simple queue name for a requests queue reference."
         return queue_ref.removeprefix("requests_")
 
     def get_responses_queue(self, client_id: str) -> str:
+        "Returns the responses queue reference for a client id."
         return f"{client_id}_responses"
 
     def get_reply_to_from_id(self, id_str: str) -> str:
+        "Derives the responses queue from a request id ({client_id}:{n})."
         return id_str.split(":")[0] + "_responses"
 
     def get_client_id(self) -> str:
+        "Generates a new unique client id (locked counter in the registry)."
         with fs_structs.structs.lock_context(
             self.registry.base_path,
             "nclients_lock",
@@ -75,6 +119,7 @@ class FileSystemConnector:
         return f"fs_client_{nclients}"
 
     def get_server_id(self) -> str:
+        "Generates a new unique worker id (locked counter in the registry)."
         with fs_structs.structs.lock_context(
             self.registry.base_path,
             "nservers_lock",
@@ -135,15 +180,15 @@ class FileSystemConnector:
                                   function names as keys and callable functions as values.
 
                                   {'queue_name': {'function_name': callable_function, ...}, ... }
+            worker_id: Id of the worker publishing the methods.
 
         Client Configuration Options:
-            - check_registry='never': Clients must manually specify queues with set_default_queue().
-            - check_registry='cache' (default): Clients can update the cache with update_registry().
-            - check_registry='always': Client always checks the latest registry before dispatching.
-                                       Huge overhead.
-
-        Note:
-            - The Client method select_queue() selects the queue to use.
+            - check_registry='cache' (default): Clients cache the registry and can
+              refresh it with update_registry_cache().
+            - check_registry='always': Client always checks the latest registry
+              before dispatching. Huge overhead.
+            - Any other value: Clients ignore the registry and send requests to
+              their default queue (see set_default_queue()).
         """
         registry = {}
         for queue_name, func_dict in requests_queues_dict.items():
@@ -190,6 +235,11 @@ class FileSystemConnector:
         return deleted_variables
 
     def unregister_methods(self, worker_id: str) -> None:
+        """Removes a worker from the registry.
+
+        Queues without remaining workers, and methods without remaining
+        queues, are deleted from the registry.
+        """
         with fs_structs.structs.lock_context(
             self.registry.base_path,
             "registry_lock",
@@ -205,16 +255,19 @@ class FileSystemConnector:
                 )
 
     def random_queue_for_method(self, method: str) -> str | None:
+        "Returns a random queue ref serving `method`, or None if there is none."
         available = self.all_queues_for_method(method)
         if len(available) == 0:
             return None
         return random.choice(available)
 
     def all_queues_for_method(self, method: str) -> list:
+        "Returns all the queue refs where requests for `method` can be sent."
         method_set = f"method_queues_{method}"
         return list(self.registry.get(method_set, []))
 
     def enqueue(self, queue_name: str, msg: Any) -> None:
+        "Appends a serialized message to the queue."
         queue = self.namespace.list(queue_name)
         queue.append(msg)
 

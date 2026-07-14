@@ -22,6 +22,18 @@ def timestamp() -> str:
 def serialize_python_call(
     fn: Callable, args: list | None = None, kwargs: dict | None = None
 ) -> list:
+    """Serializes a python call with dill for `eval_py_function`.
+
+    Args:
+        fn (function): Function to be serialized.
+        args (list, optional): Positional arguments for `fn`. Defaults to None.
+        kwargs (dict, optional): Keyword arguments for `fn`. Defaults to None.
+
+    Returns:
+        list: [base64-encoded dill-serialized `fn`, args, kwargs], the
+            positional args expected by the worker's `eval_py_function`.
+
+    """
     args = [] if args is None else args
     kwargs = {} if kwargs is None else kwargs
     pickled_fn = dill.dumps(fn)
@@ -31,6 +43,37 @@ def serialize_python_call(
 
 
 class Client:
+    """Sends RPC requests over a connector and collects the responses.
+
+    Requests are JSON-RPC 2.0 style messages sent to the requests queues
+    served by workers. Responses are cached until they are consumed by
+    `wait_one_response` (usually through the `get` method of an `AsyncResult`).
+
+    Args:
+        serializer: Object with `dumps`/`loads` methods used to serialize
+            messages (e.g. `JsonSerializer`, `DummySerializer`).
+        connector: Transport instance (e.g. `RedisConnector`,
+            `FileSystemConnector`).
+        client_id (str, optional): Client identifier. Defaults to None.
+            If None, a new one is requested to the connector.
+        check_registry (str): How to select the queue for a method.
+            Defaults to 'cache'.
+            - 'cache': choose among the queues in the local registry cache
+              (refreshed with `update_registry_cache`).
+            - 'always': check the connector registry on every request.
+              Huge overhead.
+            - Any other value: always send to the default queue
+              (see `set_default_queue`).
+        use_reply_to (bool): If True, requests include the client's
+            responses queue in the `reply_to` key. Defaults to False
+            (workers derive the responses queue from the request `id`).
+        default_queue (str): Simple name of the default requests queue.
+            Defaults to 'default'.
+        timeout (float, optional): Default timeout in seconds for waiting
+            responses. Defaults to 24 * 60 * 60. If None, wait forever.
+
+    """
+
     def __init__(
         self,
         serializer,
@@ -87,24 +130,40 @@ class Client:
         self.timeout = timeout
 
     def set_default_queue(self, queue: str) -> None:
+        "Sets the default requests queue from its simple name."
         self.default_queue_ref = self.connector.get_requests_queue(queue)
 
     def to_requests_queue_ref(self, queue_name: str) -> str:
+        "Returns the connector queue reference for a simple queue name."
         return self.connector.get_requests_queue(queue_name)
 
     def simple_queue_name(self, queue_ref: str) -> str:
+        "Returns the simple queue name for a connector queue reference."
         return self.connector.requests_queue_name(queue_ref)
 
     def generate_id(self) -> str:
+        "Generates a new request id with format {client_id}:{n}."
         self.last_request_idnumber += 1
         self.last_request_id = f"{self.client_id}:{str(self.last_request_idnumber)}"
         return self.last_request_id
 
     def update_registry_cache(self) -> None:
+        "Refreshes the local cache of the methods and workers registries."
         self._registry["methods"] = self.connector.methods_registry()
         self._registry["workers"] = self.connector.workers_registry()
 
     def registry(self, update: bool = False) -> dict:
+        """Returns the cached registry with simple queue names.
+
+        Args:
+            update (bool): If True, refresh the cache first with
+                `update_registry_cache`. Defaults to False.
+
+        Returns:
+            dict: {"methods": {method: [queue_name, ...]},
+                "workers": {queue_name: [worker_id, ...]}}.
+
+        """
         registry = {}
         if update:
             self.update_registry_cache()
@@ -136,6 +195,17 @@ class Client:
             return [self.default_queue_ref]
 
     def all_queues_for_method(self, method: str, update: bool = False) -> list:
+        """Returns the simple names of the queues that serve a method.
+
+        Args:
+            method (str): Remote function name.
+            update (bool): If True and `check_registry` is 'cache', refresh
+                the cache first. Defaults to False.
+
+        Returns:
+            list: List of simple queue names.
+
+        """
         if update and self.check_registry == "cache":
             self.update_registry_cache()
         return [
@@ -143,6 +213,16 @@ class Client:
         ]
 
     def all_workers_for_method(self, method: str, update: bool = False) -> list:
+        """Returns the ids of the workers that serve a method.
+
+        Args:
+            method (str): Remote function name.
+            update (bool): If True, refresh the cache first. Defaults to False.
+
+        Returns:
+            list: Sorted list of worker ids.
+
+        """
         if update or self.check_registry == "always":
             self.update_registry_cache()
         r = self._registry
@@ -210,7 +290,7 @@ class Client:
 
         If no `id` is provided and `is_notification` is False, generates a new one.
         Reusing an `id` constitutes a retry; the first response that is available
-        will be used (with no guaranties).
+        will be used (with no guarantees).
 
         Args:
             method (str): Remote function name.
@@ -222,7 +302,7 @@ class Client:
                 `reply_to` key. Defaults to None. Not included in the JSON RPC 2.0 specification.
                 If None and the Client's `use_reply_to` is True, uses the Client's `responses_queue` attribute.
                 Doesn't set `reply_to` otherwise. If `reply_to` is not defined in the `request`
-                message, the worker can response guessing the `response_queue` from de `request` `id`.
+                message, the worker can respond guessing the `response_queue` from the `request` `id`.
             queue (str, optional): Queue to send the request to. Defaults to None. If None, selects
                 the queue based on:
                 - Available queues for the method if client's `check_registry` is 'always' or 'cache'
@@ -281,20 +361,19 @@ class Client:
         ack: bool | None = None,
         **options: Any,
     ) -> list:
-        """Sends an batch request that will be executed by a single worker.
+        """Sends a batch request that will be executed by a single worker.
 
         Args:
             requests_lst (list): List of tuples [(method, args, kwargs), ...].
-                The tuples match the first tree positional args of the `single_request`
-                method. They can have less than three items. In this case, they will
-                use the default values for the `single_request` args that are not in the tuple.
+                The tuples match the first three positional args of the
+                `single_request` function and must have exactly three items.
             queue (str, optional): Queue to send the batch request to. Defaults to None.
                 If None, selects randomly one of the common queues available for all the methods
                 in `requests_lst`.
-            retry (bool): Include requests info in the AsyncResult objects in
-                order to make posible retrying every individual request. Defaults to False.
-            ack (bool, optional): True if the worker sends a ack message when the request is received. False or
-                None otherwise. Defaults to None.
+            retry (bool, optional): Currently ignored. Batch requests carry no
+                retry info, so they cannot be retried individually.
+            ack (bool, optional): Currently ignored. The individual requests
+                are sent without the `ack` key, so no ack messages are sent.
             **options: Additional arguments added to the each individual request under the 'options' key.
 
         Returns:
@@ -481,7 +560,6 @@ class Client:
             list: Pending ids if timeout, [] if ok.
 
         Raises:
-            TimeoutError
             ValueError: If there are ids neither in responses nor in pending.
         """
         if timeout is None:
@@ -531,7 +609,7 @@ class Client:
     ) -> dict:
         """Wait for the response with id=id.
 
-        Used by de get method of AsyncResult.
+        Used by the get method of AsyncResult.
 
         Args:
             id (str):
@@ -588,7 +666,7 @@ class Client:
                 - Available queues for the method if client's `check_registry` is 'always' or 'cache'
                 - Client's `default_requests_queue` attribute otherwise.
             retry (bool): Include requests info in AsyncResult object in
-                order to make posible retrying the request. Defaults to False.
+                order to make possible retrying the request. Defaults to False.
             ack (bool, optional): True if the worker sends a ack message when the request is received. False or
                 None otherwise. Defaults to None.
 
@@ -607,7 +685,7 @@ class Client:
         queue: str | None = None,
         timeout: float | None = None,
     ) -> Any:
-        """Sends an asynchronous single request.
+        """Sends a synchronous single request and waits for the result.
 
         Args:
             method (str): Remote function name.
@@ -638,20 +716,20 @@ class Client:
     ) -> list:
         """Sends an asynchronous batch request that will be executed by a single worker.
 
-        Each individual request within the batch has is own id assigned.
+        Each individual request within the batch has its own id assigned.
 
         Args:
-            requests_lst (list): List of tuples [(method, args, kwargs, queue), ...].
-                The tuples match the first four positional args of the `rpc_async`
-                method. They can have less than four items. In this case, they will
-                use the default values for the `rpc_async` args that are not in the tuple.
+            requests_lst (list): List of tuples [(method, args, kwargs), ...].
+                The tuples must have exactly three items. A per-request queue is
+                not supported: the whole batch is sent to a single common queue.
             queue (str, optional): Queue to send the batch request to. Defaults to None.
                 If None, selects randomly one of the common queues available for all the methods
                 in `requests_lst`.
-            retry (bool): Include requests info in the AsyncResult objects in
-                order to make posible retrying every individual request. Defaults to False.
-            ack (bool, optional): True if the worker sends a ack message when the request is received.
-                False or None otherwise. Defaults to None.
+            retry (bool, optional): Currently ignored. The AsyncResult objects
+                are created without retry info, so the individual requests
+                cannot be retried.
+            ack (bool, optional): Currently ignored. The individual requests
+                are sent without the `ack` key, so no ack messages are sent.
 
         Returns:
             list: List of AsyncResult objects of the individual requests within the batch.
@@ -692,7 +770,7 @@ class Client:
                 method. They can have less than four items. In this case, they will
                 use the default values for the `rpc_async` args that are not in the tuple.
             retry (bool): Include requests info in the AsyncResult objects in
-                order to make posible retrying every individual request. Defaults to False.
+                order to make possible retrying every individual request. Defaults to False.
             ack (bool, optional): True if the worker sends a ack message when the request is received. False or
                 None otherwise. Defaults to None.
 
@@ -746,16 +824,12 @@ class Client:
                 - Available queues for the method if client's `check_registry` is 'always' or 'cache'
                 - Client's `default_requests_queue` attribute otherwise.
             retry (bool): Include requests info in AsyncResult object in
-                order to make posible retrying the request. Defaults to False.
+                order to make possible retrying the request. Defaults to False.
             ack (bool, optional): True if the worker sends a ack message when the request is received. False or
                 None otherwise. Defaults to None.
 
         Returns:
-            AsyncResult:
-
-        Raises:
-            TimeoutError
-            RemoteException
+            AsyncResult
 
         """
         py_call = serialize_python_call(fn, args=args, kwargs=kwargs)

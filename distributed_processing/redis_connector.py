@@ -10,6 +10,20 @@ logger = logging.getLogger(__name__)
 
 
 class RedisConnector:
+    """Transport on Redis: lists as queues, sets as registries.
+
+    All keys are prefixed with the namespace, so several independent
+    deployments can share the same Redis database.
+
+    Args:
+        redis_host (str): Redis server host. Defaults to 'localhost'.
+        redis_port (int): Redis server port. Defaults to 6379.
+        redis_db (int): Redis database number. Defaults to 0.
+        namespace (str): Prefix for every key used by the connector.
+            Defaults to 'tasks'.
+
+    """
+
     def __init__(
         self,
         redis_host: str = "localhost",
@@ -26,23 +40,29 @@ class RedisConnector:
             self.connection.delete(item)
 
     def get_requests_queue(self, queue_name: str) -> str:
+        "Returns the requests queue reference for a simple queue name."
         return f"{self.namespace}:requests:{queue_name}"
 
     def requests_queue_name(self, queue_ref: str) -> str:
+        "Returns the simple queue name for a requests queue reference."
         return queue_ref.split(":")[-1]
 
     def get_client_id(self) -> str:
+        "Generates a new unique client id (atomic counter in Redis)."
         nclients = str(self.connection.incr(f"{self.namespace}:nclients", 1))
         return f"{self.namespace}:redis_client:{nclients}"
 
     def get_server_id(self) -> str:
+        "Generates a new unique worker id (atomic counter in Redis)."
         nservers = str(self.connection.incr(f"{self.namespace}:nservers", 1))
         return f"{self.namespace}:redis_server:{nservers}"
 
     def get_responses_queue(self, client_id: str) -> str:
+        "Returns the responses queue reference for a client id."
         return f"{client_id}:responses"
 
     def get_reply_to_from_id(self, id_str: str) -> str:
+        "Derives the responses queue from a request id ({client_id}:{n})."
         return ":".join(id_str.split(":")[:-1]) + ":responses"
 
     def methods_registry(self) -> dict:
@@ -102,16 +122,19 @@ class RedisConnector:
             self.connection.sadd(queue_set, worker_id)
 
     def random_queue_for_method(self, method: str) -> str | None:
+        "Returns a random queue ref serving `method`, or None if there is none."
         available = self.all_queues_for_method(method)
         if len(available) == 0:
             return None
         return random.choice(available)
 
     def all_queues_for_method(self, method: str) -> list:
+        "Returns all the queue refs where requests for `method` can be sent."
         method_set = f"{self.namespace}:method_queues:{method}"
         return [x.decode("utf8") for x in self.connection.smembers(method_set)]
 
     def enqueue(self, queue: str, msg: Any) -> None:
+        "Appends a serialized message to the queue."
         self.connection.rpush(queue, msg)
 
     def pop(self, queue: str, timeout: float = -1) -> tuple | None:
