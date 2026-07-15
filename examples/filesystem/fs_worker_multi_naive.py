@@ -1,23 +1,19 @@
 # %%
 import multiprocessing as mp
 import uuid
+from os import getenv
 from time import sleep
 
 import dill
+from dotenv import load_dotenv
 
 from distributed_processing.utils import fsworker
 
 #from multi import worker1
 
 # %%
-CURRO = True
-
-if CURRO:
-    NS_PATH ="G:\\fs_namespaces\\prueba_distribuida_multi"
-    NS_PATH ="C:\\fs_namespaces\\prueba_distribuida_multi"
-
-else:
-    NS_PATH = "/home/augusto/python/notebooks/fs_namespaces/prueba_distribuida_multi"
+load_dotenv()
+NS_PATH = getenv("NS_PATH")
 
 
 # %%
