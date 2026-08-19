@@ -7,7 +7,7 @@ from dotenv import load_dotenv
 from distributed_processing.utils import fsnode, fsworker
 
 
-def worker1(worker_id):
+def worker1(worker_id=None):
     server = fsworker(NS_PATH, clean=False, worker_id=worker_id)
 
     def info():
