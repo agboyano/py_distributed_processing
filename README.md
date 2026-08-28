@@ -130,5 +130,10 @@ distributed_processing/
 └── utils.py                 # fsworker/fsclient/fsnode (filesystem helpers)
 ```
 
-`examples/` contains usage notebooks (filesystem, Redis, and a real
-Monte Carlo case for autocallables).
+`examples/` contains usage notebooks (filesystem, Redis, and a Monte Carlo
+pricing example for autocallables).
+
+Notebooks are committed **without outputs**: saved outputs carry tracebacks
+with local paths and user names, and they bloat diffs. Before committing one,
+strip them — `pip install nbstripout && nbstripout --install` sets up the git
+filter declared in `.gitattributes` and does it automatically.
