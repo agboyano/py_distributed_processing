@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import base64
+import inspect
 import logging
 import random
 from datetime import datetime
-from time import time
+from time import sleep, time
 from typing import Any, Callable
 
 import dill
@@ -34,6 +35,20 @@ def eval_py_function(
     args = [] if args is None else args
     kwargs = {} if kwargs is None else kwargs
     return dill.loads(base64.b64decode(str_fn))(*args, **kwargs)
+
+
+def check_params(fn: Callable, args: list, kwargs: dict) -> None:
+    """Raises TypeError if `args`/`kwargs` do not match the signature of `fn`.
+
+    Lets the worker tell "invalid params" (-32602) apart from a TypeError
+    raised *inside* the function (-32603). If the signature of `fn` cannot
+    be inspected (some builtins and C extensions), the check is skipped.
+    """
+    try:
+        signature = inspect.signature(fn)
+    except (TypeError, ValueError):
+        return
+    signature.bind(*args, **kwargs)
 
 
 class Worker:
@@ -92,6 +107,7 @@ class Worker:
             worker_id if worker_id is not None else self.connector.get_server_id()
         )
         self._closed = False
+        self._stop_requested = False
         logger.info(f"Worker id: {self.worker_id}")
 
     def add_requests_queue(
@@ -468,14 +484,22 @@ class Worker:
         kwargs = request["kwargs"] if "kwargs" in request else {}
 
         execution_start = time()
+
+        # Invalid params (-32602) only when the arguments do not fit the
+        # signature. A TypeError raised inside the function is an internal
+        # error (-32603) like any other exception.
+        try:
+            check_params(
+                self.requests_queues[dispatched_to][0][request["method"]], args, kwargs
+            )
+        except TypeError:
+            return self.error(-32602, request, dispatched_to, execution_start)
+
         try:
             result = self._exec_method_in_queue(
                 dispatched_to, request["method"], args, kwargs
             )
             return self.result(result, request, dispatched_to, execution_start)
-
-        except TypeError:
-            return self.error(-32602, request, dispatched_to, execution_start)
 
         except Exception:
             return self.error(-32603, request, dispatched_to, execution_start)
@@ -658,7 +682,11 @@ class Worker:
             )
 
     def run(self, timeout: float | None = None) -> None:
-        """Listen and process requests, forever or for `timeout` seconds."""
+        """Listen and process requests, forever or for `timeout` seconds.
+
+        Any exception raised by the connector or the serializer propagates
+        and ends the loop. For a long-running service prefer `run_forever`.
+        """
         if timeout is None or timeout <= -0.00001:
             while True:
                 self.run_once(timeout=-1.0)
@@ -668,3 +696,65 @@ class Worker:
         while time_left > 0:
             self.run_once(timeout=time_left)
             time_left = timeout - (time() - t_0)
+
+    def stop(self) -> None:
+        """Asks `run_forever` to return after the current iteration.
+
+        Can be called from a registered function (it runs inside the loop)
+        or from another thread. A blocking pop is not interrupted: the loop
+        exits once the connector returns.
+        """
+        self._stop_requested = True
+
+    def run_forever(
+        self,
+        backoff: tuple = (1.0, 60.0),
+        max_consecutive_errors: int | None = None,
+    ) -> None:
+        """Listen and process requests until `stop` is called, surviving errors.
+
+        Unlike `run`, exceptions raised while waiting for or dispatching a
+        request (connector failures such as a shared drive not responding,
+        lock timeouts, corrupt messages...) are logged and the loop retries
+        after an exponential backoff. Exceptions raised by the registered
+        functions never reach this loop: they are answered as error
+        responses. `KeyboardInterrupt` and `SystemExit` are not caught.
+
+        Args:
+            backoff (tuple): (first, max) seconds to wait after an error.
+                The wait doubles on every consecutive error, up to `max`,
+                and resets after a successful iteration.
+                Defaults to (1.0, 60.0).
+            max_consecutive_errors (int, optional): If not None, re-raise
+                the exception once this many errors happen in a row.
+                Defaults to None (retry forever).
+
+        Raises:
+            ValueError: If the worker has no queues to listen.
+
+        """
+        if len(self.requests_queues) == 0:
+            raise ValueError("No queues to listen.")
+
+        first_wait, max_wait = backoff
+        consecutive_errors = 0
+        self._stop_requested = False
+
+        while not self._stop_requested:
+            try:
+                self.run_once(timeout=-1.0)
+                consecutive_errors = 0
+            except Exception:
+                consecutive_errors += 1
+                wait = min(max_wait, first_wait * 2 ** (consecutive_errors - 1))
+                logger.exception(
+                    f"{timestamp()} Worker: {self.worker_id} error #{consecutive_errors} in the main loop. Retrying in {wait:.1f}s"
+                )
+                if (
+                    max_consecutive_errors is not None
+                    and consecutive_errors >= max_consecutive_errors
+                ):
+                    raise
+                sleep(wait)
+
+        logger.info(f"{timestamp()} Worker: {self.worker_id} stopped.")

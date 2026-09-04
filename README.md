@@ -55,6 +55,20 @@ worker.update_methods_registry()
 worker.run()          # listens indefinitely; run(timeout=60) to bound it
 ```
 
+For a long-running service use `run_forever()` instead of `run()`: connector
+errors (a shared drive that stops responding, a lock timeout, a corrupt
+message) are logged and retried with exponential backoff instead of ending
+the process. `worker.stop()` (from a registered function or another thread)
+makes it return; use a `with Worker(...)` block, or call `close()`, so the
+worker is removed from the registry on shutdown.
+
+```python
+with Worker(JsonSerializer(), RedisConnector("localhost")) as worker:
+    worker.add_requests_queue("my_queue", {"add": add})
+    worker.update_methods_registry()
+    worker.run_forever(backoff=(1, 60))   # retry forever; max_consecutive_errors=N to give up
+```
+
 Client (another process):
 
 ```python
@@ -99,8 +113,9 @@ JSON-RPC 2.0-style messages with extensions: `reply_to` (response queue),
 `ack` (receipt confirmation), `is_notification`, `options` and `timing`/
 `metadata` (worker, queue, execution times). Standard error codes:
 `-32600` invalid request, `-32601` method not found, `-32602` invalid
-params, `-32603` internal error (includes the remote traceback if the worker
-is created with `with_trace=True`).
+params (the arguments do not fit the function signature), `-32603` internal
+error (any exception raised by the function, including `TypeError`; includes
+the remote traceback if the worker is created with `with_trace=True`).
 
 ## Tests and quality
 

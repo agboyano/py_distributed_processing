@@ -53,6 +53,55 @@ class TestRoundTrip:
         (r,) = pop_responses(connector, "cli", s)
         assert r["error"]["code"] == -32602
 
+    def test_type_error_inside_function_is_internal_error(self, connector):
+        def bad_concat(x):
+            return "a" + x  # TypeError raised *inside* the function
+
+        s = JsonSerializer()
+        w = Worker(s, connector)
+        w.add_requests_queue("q", {"bad_concat": bad_concat})
+        send_request(
+            connector, s, "q", single_request("bad_concat", args=[1], id="cli:1")
+        )
+        w.run_once(timeout=0.1)
+
+        (r,) = pop_responses(connector, "cli", s)
+        assert r["error"]["code"] == -32603
+        assert "TypeError" in r["error"]["trace"]
+
+    def test_bad_kwargs_returns_invalid_params_error(self, connector, worker):
+        s = worker.serializer
+        send_request(
+            connector,
+            s,
+            "q",
+            single_request("add", kwargs={"a": 1, "z": 2}, id="cli:1"),
+        )
+        worker.run_once(timeout=0.1)
+
+        (r,) = pop_responses(connector, "cli", s)
+        assert r["error"]["code"] == -32602
+
+    def test_function_without_signature_is_still_called(self, connector):
+        # Some builtins have no inspectable signature: the params check is
+        # skipped and the call goes through.
+        class NoSignature:
+            @property
+            def __signature__(self):
+                raise ValueError("no signature found")
+
+            def __call__(self, x):
+                return x * 2
+
+        s = JsonSerializer()
+        w = Worker(s, connector)
+        w.add_requests_queue("q", {"twice": NoSignature()})
+        send_request(connector, s, "q", single_request("twice", args=[21], id="cli:1"))
+        w.run_once(timeout=0.1)
+
+        (r,) = pop_responses(connector, "cli", s)
+        assert r["result"] == 42
+
     def test_remote_exception_returns_internal_error(self, connector, worker):
         s = worker.serializer
         send_request(connector, s, "q", single_request("boom", id="cli:1"))
@@ -128,6 +177,85 @@ class TestRun:
         w = Worker(JsonSerializer(), connector)
         with pytest.raises(ValueError):
             w.run_once(timeout=0.1)
+
+
+class FlakyConnector:
+    """Wraps a connector so that `pop_multiple` raises the first `n` times."""
+
+    def __init__(self, connector, failures, exc=None):
+        self._connector = connector
+        self.failures = failures
+        self.exc = PermissionError("drive not ready") if exc is None else exc
+        self.calls = 0
+
+    def pop_multiple(self, queues, timeout=-1):
+        self.calls += 1
+        if self.calls <= self.failures:
+            raise self.exc
+        return self._connector.pop_multiple(queues, timeout)
+
+    def __getattr__(self, name):
+        return getattr(self._connector, name)
+
+
+class TestRunForever:
+    def _worker_that_stops_itself(self, connector):
+        s = JsonSerializer()
+        w = Worker(s, connector)
+
+        def halt():
+            w.stop()
+            return "bye"
+
+        w.add_requests_queue("q", {"add": add, "halt": halt})
+        return w, s
+
+    def test_stop_from_registered_function(self, connector):
+        w, s = self._worker_that_stops_itself(connector)
+        send_request(connector, s, "q", single_request("add", args=[1, 2], id="cli:1"))
+        send_request(connector, s, "q", single_request("halt", id="cli:2"))
+
+        w.run_forever(backoff=(0.01, 0.02))
+
+        by_id = {r["id"]: r for r in pop_responses(connector, "cli", s)}
+        assert by_id["cli:1"]["result"] == 3
+        assert by_id["cli:2"]["result"] == "bye"
+
+    def test_survives_connector_errors_with_backoff(self, connector, caplog):
+        flaky = FlakyConnector(connector, failures=2)
+        w, s = self._worker_that_stops_itself(flaky)
+        send_request(connector, s, "q", single_request("halt", id="cli:1"))
+
+        t_0 = time.time()
+        with caplog.at_level("ERROR", logger="distributed_processing.worker"):
+            w.run_forever(backoff=(0.05, 1.0))
+        elapsed = time.time() - t_0
+
+        # two failures: waits 0.05 + 0.10 before the third, successful, pop
+        assert flaky.calls == 3
+        assert elapsed >= 0.15
+        assert sum("error #" in m for m in caplog.messages) == 2
+        (r,) = pop_responses(connector, "cli", s)
+        assert r["result"] == "bye"
+
+    def test_max_consecutive_errors_reraises(self, connector):
+        flaky = FlakyConnector(connector, failures=10)
+        w, _ = self._worker_that_stops_itself(flaky)
+
+        with pytest.raises(PermissionError):
+            w.run_forever(backoff=(0.001, 0.002), max_consecutive_errors=3)
+        assert flaky.calls == 3
+
+    def test_without_queues_raises(self, connector):
+        w = Worker(JsonSerializer(), connector)
+        with pytest.raises(ValueError):
+            w.run_forever()
+
+    def test_keyboard_interrupt_is_not_swallowed(self, connector):
+        flaky = FlakyConnector(connector, failures=1, exc=KeyboardInterrupt())
+        w, _ = self._worker_that_stops_itself(flaky)
+        with pytest.raises(KeyboardInterrupt):
+            w.run_forever(backoff=(0.001, 0.002))
 
 
 class TestLifecycle:
