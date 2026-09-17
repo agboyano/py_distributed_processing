@@ -43,18 +43,19 @@ class FileSystemConnector:
         pop_sleep_watchdog (tuple): (min, max) seconds of the uniform
             random wait after a file event, to minimize the probability of
             race conditions.
-        lock_pop_timeout (float): Seconds to wait for the queue lock in
-            `pop_multiple`.
-        lock_pop_watchdog_timeout (float): Seconds to wait for a file event
-            while waiting for the queue lock.
-        lock_pop_wait (tuple): (min, max) seconds of the uniform random
-            wait between queue lock attempts.
+        pop_race_wait (tuple): (min, max) seconds of the uniform random
+            wait, in `pop_multiple`, after another worker took the element
+            this worker was about to pop, before trying the next one.
+            `FSList.pop_left` takes no lock (fs_structs >= 0.0.5).
         registry_timeout (float): Seconds to wait for registry reads.
         lock_registry_timeout (float): Seconds to wait for the registry lock.
         lock_registry_watchdog_timeout (float): Seconds to wait for a file
             event while waiting for the registry lock.
         lock_registry_wait (tuple): (min, max) seconds of the uniform
             random wait between registry lock attempts.
+        lock_registry_max_age (float): A registry lock older than this many
+            seconds is treated as left by a dead process and broken. Use
+            minutes, not seconds, and keep the machine clocks in sync.
 
     """
 
@@ -74,15 +75,14 @@ class FileSystemConnector:
         self.pop_watchdog_timeout: float = 60
         self.pop_sleep_watchdog = (0.0, 0.1)
 
-        self.lock_pop_timeout: float = 10
-        self.lock_pop_watchdog_timeout: float = 2
-        self.lock_pop_wait = (0.0, 0.1)
+        self.pop_race_wait = (0.0, 0.1)
 
         self.registry_timeout: float = 10
 
         self.lock_registry_timeout: float = 60
         self.lock_registry_watchdog_timeout: float = 10
         self.lock_registry_wait = (0.0, 0.1)
+        self.lock_registry_max_age: float = 600
 
     def clean_namespace(self) -> None:
         "Deletes every object linked to the namespace."
@@ -113,6 +113,7 @@ class FileSystemConnector:
             self.lock_registry_timeout,
             self.lock_registry_watchdog_timeout,
             self.lock_registry_wait,
+            max_age=self.lock_registry_max_age,
         ):
             nclients = self.registry.get("nclients", 0) + 1
             self.registry["nclients"] = nclients
@@ -126,6 +127,7 @@ class FileSystemConnector:
             self.lock_registry_timeout,
             self.lock_registry_watchdog_timeout,
             self.lock_registry_wait,
+            max_age=self.lock_registry_max_age,
         ):
             nservers = self.registry.get("nservers", 0) + 1
             self.registry["nservers"] = nservers
@@ -141,6 +143,7 @@ class FileSystemConnector:
             self.lock_registry_timeout,
             self.lock_registry_watchdog_timeout,
             self.lock_registry_wait,
+            max_age=self.lock_registry_max_age,
         ):
             method_queues = [x for x in self.registry.keys() if "method_queues_" in x]
 
@@ -161,6 +164,7 @@ class FileSystemConnector:
             self.lock_registry_timeout,
             self.lock_registry_watchdog_timeout,
             self.lock_registry_wait,
+            max_age=self.lock_registry_max_age,
         ):
             workers_queues = [x for x in self.registry.keys() if "workers_queue_" in x]
 
@@ -201,6 +205,7 @@ class FileSystemConnector:
             self.lock_registry_timeout,
             self.lock_registry_watchdog_timeout,
             self.lock_registry_wait,
+            max_age=self.lock_registry_max_age,
         ):
             for method in registry:
                 method_set = f"method_queues_{method}"
@@ -246,6 +251,7 @@ class FileSystemConnector:
             self.lock_registry_timeout,
             self.lock_registry_watchdog_timeout,
             self.lock_registry_wait,
+            max_age=self.lock_registry_max_age,
         ):
             for queue_name in self._unregister_member_from_sets(
                 "workers_queue_", worker_id, "Queue", "workers"
@@ -339,15 +345,10 @@ class FileSystemConnector:
             - Supports both watchdog and polling modes
         """
 
-        def try_pop_multiple(
-            queue_refs,
-            timeout=self.lock_pop_timeout,
-            watchdog_timeout=self.lock_pop_watchdog_timeout,
-            wait=self.lock_pop_wait,
-        ):
+        def try_pop_multiple(queue_refs):
             for q_name, queue in queue_refs:
                 try:
-                    return (q_name, queue.pop_left(timeout, watchdog_timeout, wait))
+                    return (q_name, queue.pop_left(wait=self.pop_race_wait))
                 except (IndexError, KeyError):
                     continue
             return False

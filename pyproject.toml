@@ -15,7 +15,9 @@ dependencies = ["dill"]
 redis = ["redis"]
 # fs_structs is a sibling project, not published on PyPI.
 # Install it locally, e.g.: pip install -e ../fs_structs
-fs = ["fs_structs", "watchdog"]
+# >= 0.0.5: FSList file names changed; every client and worker on a namespace
+# must run the same version, or they do not see each other's messages.
+fs = ["fs_structs>=0.0.5a0", "watchdog"]
 all = ["distributed-processing[redis,fs]"]
 dev = ["pytest", "ruff"]
 
