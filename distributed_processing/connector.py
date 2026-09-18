@@ -349,6 +349,14 @@ class Connector(ABC):
         The value goes through the connector's serializer, so it must be
         encodable by it (JSON on Redis by default). The last write wins.
 
+        Note:
+            No lock is taken, on purpose: a set is a single atomic write
+            (one rename, one Redis SET) and the usual case is one writer
+            publishing a parameter for many readers. So a set that lands
+            while an `update_variable` of the same name is in flight can be
+            overwritten by that update. A variable that is updated with
+            `update_variable` should only be written with `update_variable`.
+
         Args:
             name (str): Variable name.
             value: Python object to share.
