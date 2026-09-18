@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "distributed-processing"
-version = "0.0.1a"
+version = "0.0.2a0"
 description = "Computación distribuída sobre colas de mensajes (RPC estilo JSON-RPC 2.0 con conectores Redis y filesystem)."
 readme = "README.md"
 requires-python = ">=3.9"

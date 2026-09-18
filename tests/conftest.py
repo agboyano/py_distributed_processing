@@ -14,9 +14,14 @@ class MemoryConnector:
     Client and worker share the same instance (same process), which makes
     it possible to unit test the whole request/response cycle without
     external infrastructure (redis, filesystem).
+
+    Queues carry Python objects; the connector owns the encoding. Messages
+    are stored encoded (JSON by default), like a real connector would, so
+    the tests still check that every message is JSON-serializable.
     """
 
-    def __init__(self):
+    def __init__(self, serializer=None):
+        self.serializer = JsonSerializer() if serializer is None else serializer
         self.queues = {}
         self.methods = {}  # method -> [queue_ref, ...]
         self.workers = {}  # queue_ref -> [worker_id, ...]
@@ -75,13 +80,13 @@ class MemoryConnector:
 
     # --- queues ---
     def enqueue(self, queue, msg):
-        self.queues.setdefault(queue, deque()).append(msg)
+        self.queues.setdefault(queue, deque()).append(self.serializer.dumps(msg))
 
     def pop(self, queue, timeout=-1):
         q = self.queues.get(queue)
         if q:
             try:
-                return (queue, q.popleft())
+                return (queue, self.serializer.loads(q.popleft()))
             except IndexError:
                 pass
         # Non blocking (returns None as if it were a timeout). The client
@@ -99,7 +104,7 @@ class MemoryConnector:
                 q = self.queues.get(name)
                 if q:
                     try:
-                        return (name, q.popleft())
+                        return (name, self.serializer.loads(q.popleft()))
                     except IndexError:
                         continue
             if time.time() >= deadline:
@@ -111,7 +116,7 @@ class MemoryConnector:
         out = []
         while q:
             try:
-                out.append(q.popleft())
+                out.append(self.serializer.loads(q.popleft()))
             except IndexError:
                 break
         return out
@@ -132,7 +137,7 @@ def connector():
 
 @pytest.fixture
 def worker(connector):
-    w = Worker(JsonSerializer(), connector)
+    w = Worker(connector)
     w.add_requests_queue("q", {"add": add, "boom": boom})
     w.update_methods_registry()
     return w
@@ -141,4 +146,4 @@ def worker(connector):
 @pytest.fixture
 def client(connector, worker):
     # Created after the worker so the registry cache is already populated.
-    return Client(JsonSerializer(), connector, check_registry="cache")
+    return Client(connector, check_registry="cache")

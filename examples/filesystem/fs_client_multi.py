@@ -25,7 +25,7 @@ fs_connector = FileSystemConnector(NS_PATH)
 fs_connector.with_watchdog=True
 fs_connector.pop_watchdog_timeout = 10
 
-client = Client(DummySerializer(), fs_connector, check_registry="cache")
+client = Client(fs_connector, check_registry="cache")
 """
 
 client = fsclient(NS_PATH)

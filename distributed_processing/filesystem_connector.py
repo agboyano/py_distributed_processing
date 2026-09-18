@@ -30,8 +30,11 @@ class FileSystemConnector:
         base_path (str): Directory shared by clients and workers.
         temp_dir (str, optional): Temporary directory used by the
             namespace for atomic writes. Defaults to None.
-        serializer: `fs_structs` serializer used to store the values.
-            Defaults to `fs_structs.structs.joblib_serializer`.
+        serializer: `fs_structs` serializer (`dump(obj, path)` / `load(path)`)
+            used to store queue items and registry entries on disk. It is
+            the only encoding step: `enqueue` receives, and the `pop*`
+            methods return, Python objects. Defaults to
+            `fs_structs.structs.joblib_serializer`.
 
     Attributes:
         with_watchdog (bool): If True (default), blocking pops wait for
@@ -273,7 +276,7 @@ class FileSystemConnector:
         return list(self.registry.get(method_set, []))
 
     def enqueue(self, queue_name: str, msg: Any) -> None:
-        "Appends a serialized message to the queue."
+        "Appends a message to the queue (stored with the `fs_structs` serializer)."
         queue = self.namespace.list(queue_name)
         queue.append(msg)
 

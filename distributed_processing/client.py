@@ -50,10 +50,9 @@ class Client:
     `wait_one_response` (usually through the `get` method of an `AsyncResult`).
 
     Args:
-        serializer: Object with `dumps`/`loads` methods used to serialize
-            messages (e.g. `JsonSerializer`, `DummySerializer`).
         connector: Transport instance (e.g. `RedisConnector`,
-            `FileSystemConnector`).
+            `FileSystemConnector`). Messages are handed to the connector as
+            Python objects; the connector owns the wire encoding.
         client_id (str, optional): Client identifier. Defaults to None.
             If None, a new one is requested to the connector.
         check_registry (str): How to select the queue for a method.
@@ -76,7 +75,6 @@ class Client:
 
     def __init__(
         self,
-        serializer,
         connector,
         client_id: str | None = None,
         check_registry: str = "cache",
@@ -84,7 +82,6 @@ class Client:
         default_queue: str = "default",
         timeout: float | None = 24 * 60 * 60,
     ):
-        self.serializer = serializer
         self.connector = connector
 
         self.use_reply_to = use_reply_to
@@ -98,8 +95,6 @@ class Client:
         # Cache for notifications (received messages with no id).
         # Deserialized responses as values.
         self.notifications: list = []
-        # Cache for responses that failed to be deserialized.
-        self.responses_parse_errors: list = []
         # Cache for acks
         self.acks: dict = {}
         # Used responses (wait_one_response).
@@ -341,9 +336,7 @@ class Client:
             **options,
         )
 
-        serialized_sr = self.serializer.dumps(sr)
-
-        self.connector.enqueue(queue_ref, serialized_sr)
+        self.connector.enqueue(queue_ref, sr)
         logger.debug(
             f"{timestamp()} Client: {self.client_id} sent request with id: {id_} to queue: {queue_ref}"
         )
@@ -422,9 +415,7 @@ class Client:
             for t in requests_lst
         ]
 
-        serialized_br = self.serializer.dumps(batch_request)
-
-        self.connector.enqueue(queue_ref, serialized_br)
+        self.connector.enqueue(queue_ref, batch_request)
 
         ids = [t["id"] for t in batch_request]
         logger.debug(
@@ -436,41 +427,31 @@ class Client:
 
         return ids
 
-    def _responses_to_dicts(self, raw_responses: list) -> tuple:
-        """Deserialize responses.
+    def _responses_to_dicts(self, responses: list) -> tuple:
+        """Classifies the responses received from the connector.
 
         Args:
-            raw_responses (list): List of responses (serialized), usually from pop or pop_all.
+            responses (list): List of response messages (Python objects, as
+                returned by the connector's pop or pop_all).
 
         Returns:
-            tuple [dict, list, list, dict]: (results_dict, no_id, parse_errors, acks_dict)
+            tuple [dict, list, dict]: (results_dict, no_id, acks_dict)
 
             results_dict (dict): Dictionary with the ids of the request as keys
-                and the deserialized response as value. The deserialized response
-                is a dict with either the key "result" or "error". The get method
-                of the AsyncResult instance, associated with the id, returns the "result",
-                if available, or throws an exception with the information in "error".
-            no_id (list): List with all the deserialized responses that have no id (notifications).
-            parse_errors (list): List with all the responses that failed to be deserialized.
+                and the response as value. The response is a dict with either
+                the key "result" or "error". The get method of the AsyncResult
+                instance, associated with the id, returns the "result", if
+                available, or throws an exception with the information in "error".
+            no_id (list): List with all the responses that have no id (notifications).
             acks_dict (dict):  Dictionary with the ids of the request as keys
-                and the deserialized ACKS as value.
+                and the ACKS as value.
 
         """
         results_dict = {}
         acks_dict = {}
         no_id = []
-        parse_errors = []
 
-        for e in raw_responses:
-            try:
-                r = self.serializer.loads(e)
-            except Exception:
-                parse_errors.append(e)
-                logger.debug(
-                    f"{timestamp()} Client: {self.client_id} a Message could NOT be deserialized"
-                )
-                continue
-
+        for r in responses:
             if is_batch_response(r):  # Batch response. Not implemented in worker.
                 logger.debug(
                     f"{timestamp()} Client: {self.client_id} received a Batch Response with {len(r)} items"
@@ -513,22 +494,19 @@ class Client:
                     f"{timestamp()} Client: {self.client_id} a Message could NOT be processed"
                 )
 
-        return results_dict, no_id, parse_errors, acks_dict
+        return results_dict, no_id, acks_dict
 
-    def _update_responses_cache(self, raw_responses: list) -> None:
-        """Deserialize raw_responses and update caches.
+    def _update_responses_cache(self, responses: list) -> None:
+        """Classifies responses and updates the caches.
 
-        Updates the client caches responses, notifications, responses_parse_errors and pending.
+        Updates the client caches responses, notifications, acks and pending.
 
         Args:
-            raw_responses (list): List of responses (serialized), usually from pop or pop_all.
+            responses (list): List of response messages, usually from pop or pop_all.
         """
-        responses_dict, no_id, parse_errors, acks_dict = self._responses_to_dicts(
-            raw_responses
-        )
+        responses_dict, no_id, acks_dict = self._responses_to_dicts(responses)
         self.responses.update(responses_dict)
         self.notifications.extend(no_id)
-        self.responses_parse_errors.extend(parse_errors)
         self.acks.update(acks_dict)
         pending = [k for k in self.pending.keys()]
         for id in pending:

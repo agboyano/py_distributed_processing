@@ -3,7 +3,6 @@ import argparse
 import mc_autocall_mapper
 
 from distributed_processing.redis_connector import RedisConnector
-from distributed_processing.serializers import JsonSerializer
 from distributed_processing.worker import Worker
 
 REDIS_HOST = "localhost"
@@ -34,7 +33,7 @@ if __name__ == "__main__":
         print(f"Cleaning namespace {args.namespace}")
         redis_connector.clean_namespace()
 
-    server = Worker(JsonSerializer(), redis_connector)
+    server = Worker(redis_connector)
 
     server.add_requests_queue("cola_1", {"mc_autocall_mp":mc_autocall_mapper.mc_autocall_mapper,
                                          "mc_autocall_mp2":mc_autocall_mapper.mc_autocall_mapper2,

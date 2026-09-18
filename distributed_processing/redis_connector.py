@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import logging
 import random
+import time
 from typing import Any
 
 import redis
+
+from .serializers import JsonSerializer
 
 logger = logging.getLogger(__name__)
 
@@ -15,12 +18,25 @@ class RedisConnector:
     All keys are prefixed with the namespace, so several independent
     deployments can share the same Redis database.
 
+    Messages are handed to `enqueue` as Python objects and returned by the
+    `pop*` methods as Python objects: the connector encodes them with
+    `serializer` before storing them in Redis and decodes them on the way
+    out. The connection is created with `decode_responses=False` (the
+    redis-py default) so payloads reach the serializer as raw bytes; the
+    connector decodes key and queue names itself. `decode_responses=True`
+    would break every serializer whose output is not UTF-8 text (pickle,
+    msgpack...).
+
     Args:
         redis_host (str): Redis server host. Defaults to 'localhost'.
         redis_port (int): Redis server port. Defaults to 6379.
         redis_db (int): Redis database number. Defaults to 0.
         namespace (str): Prefix for every key used by the connector.
             Defaults to 'tasks'.
+        serializer (optional): Object with `dumps(obj) -> bytes` and
+            `loads(bytes) -> obj`. Defaults to `JsonSerializer()`. Any
+            module with that pair works as is (`pickle`, `dill`, `msgpack`).
+            A message that `loads` cannot decode is logged and skipped.
 
     """
 
@@ -30,9 +46,13 @@ class RedisConnector:
         redis_port: int = 6379,
         redis_db: int = 0,
         namespace: str = "tasks",
+        serializer=None,
     ):
-        self.connection = redis.Redis(redis_host, redis_port, redis_db)
+        self.connection = redis.Redis(
+            redis_host, redis_port, redis_db, decode_responses=False
+        )
         self.namespace = namespace
+        self.serializer = JsonSerializer() if serializer is None else serializer
 
     def clean_namespace(self) -> None:
         "Deletes every object linked to the namespace."
@@ -165,31 +185,64 @@ class RedisConnector:
         method_set = f"{self.namespace}:method_queues:{method}"
         return [x.decode("utf8") for x in self.connection.smembers(method_set)]
 
+    def _loads(self, queue: bytes | str, raw: bytes) -> tuple | None:
+        "Returns (queue_name, obj), or None (after logging) if `raw` cannot be decoded."
+        queue_name = queue.decode("utf8") if isinstance(queue, bytes) else queue
+        try:
+            return queue_name, self.serializer.loads(raw)
+        except Exception:
+            logger.error(
+                f"Message from queue {queue_name} could not be decoded and was dropped: {raw[:80]!r}"
+            )
+            return None
+
+    def _blpop(self, queues: str | list, timeout: float) -> tuple | None:
+        """Blocking pop from one or more queues, skipping undecodable messages.
+
+        timeout <= 0 waits indefinitely. Returns (queue_name, obj), or None
+        on timeout. A skipped message does not extend the total wait.
+        """
+        forever = timeout <= 0
+        deadline = None if forever else time.time() + timeout
+        while True:
+            # blpop timeout == 0 waits indefinitely
+            wait = 0 if forever else deadline - time.time()
+            if not forever and wait <= 0:
+                return None
+            popped = self.connection.blpop(queues, timeout=wait)
+            if popped is None:
+                return None
+            decoded = self._loads(*popped)
+            if decoded is not None:
+                return decoded
+
     def enqueue(self, queue: str, msg: Any) -> None:
-        "Appends a serialized message to the queue."
-        self.connection.rpush(queue, msg)
+        "Appends a message to the queue (encoded with the serializer)."
+        self.connection.rpush(queue, self.serializer.dumps(msg))
 
     def pop(self, queue: str, timeout: float = -1) -> tuple | None:
-        """Blocking pop. timeout <= 0 waits indefinitely. Used by clients."""
-        # blpop timeout == 0 waits indefinitely
-        return self.connection.blpop(queue, timeout=max(timeout, 0))
+        """Blocking pop. timeout <= 0 waits indefinitely. Used by clients.
+
+        Returns (queue_name, obj), or None on timeout.
+        """
+        return self._blpop(queue, timeout)
 
     def pop_multiple(self, queues: list, timeout: float = -1) -> tuple | None:
         """Blocking pop from multiple queues, ordered by priority (highest first).
 
         timeout: maximum wait time in seconds (<= 0 = wait indefinitely).
-        Returns (queue_name, value), or None on timeout. Used by workers.
+        Returns (queue_name, obj), or None on timeout. Used by workers.
         """
-        # blpop timeout == 0 waits indefinitely
-        request_redis = self.connection.blpop(queues, timeout=max(timeout, 0))
-        if request_redis is not None:
-            return request_redis[0].decode("utf8"), request_redis[1]
-
-        return None
+        return self._blpop(queues, timeout)
 
     def pop_all(self, queue: str) -> list:
-        """Pops and returns every message available in the queue. Used by clients."""
+        """Pops and returns every message available in the queue. Used by clients.
+
+        Undecodable messages are logged and left out.
+        """
         pipe = self.connection.pipeline()
         pipe.lrange(queue, 0, -1)
         pipe.delete(queue)
-        return pipe.execute()[0]
+        raw_messages = pipe.execute()[0]
+        decoded = [self._loads(queue, raw) for raw in raw_messages]
+        return [d[1] for d in decoded if d is not None]

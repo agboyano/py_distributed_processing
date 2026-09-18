@@ -61,10 +61,9 @@ class Worker:
     public queues and methods on shutdown.
 
     Args:
-        serializer: Object with `dumps`/`loads` methods used to serialize
-            messages (e.g. `JsonSerializer`, `DummySerializer`).
         connector: Transport instance (e.g. `RedisConnector`,
-            `FileSystemConnector`).
+            `FileSystemConnector`). Messages are handed to the connector as
+            Python objects; the connector owns the wire encoding.
         worker_id (str, optional): Worker identifier. Defaults to None.
             If None, a new one is requested to the connector.
         with_trace (bool): If True, error responses include the remote
@@ -78,13 +77,11 @@ class Worker:
 
     def __init__(
         self,
-        serializer,
         connector,
         worker_id: str | None = None,
         with_trace: bool = True,
         reply_to_default: str | None = None,
     ):
-        self.serializer = serializer
         self.connector = connector
 
         # Insertion order defines queue priority (dicts respect key
@@ -475,7 +472,7 @@ class Worker:
             and request["ack"]
         ):
             msg = ack(id_, self.worker_id, dispatched_to)
-            self.connector.enqueue(reply_to, self.serializer.dumps(msg))
+            self.connector.enqueue(reply_to, msg)
             logger.debug(
                 f"{timestamp()} Worker: {self.worker_id} Sent Ack to queue: {reply_to} for request {id_}"
             )
@@ -596,7 +593,7 @@ class Worker:
         if len(sorted_queues) == 0:
             raise ValueError("No queues to listen.")
 
-        # `pop_multiple` returns tuple (queue name, serialized_request), or None, if timeout
+        # `pop_multiple` returns tuple (queue name, request), or None, if timeout
         # returns only ONE request (can be a Batch Request)
         # queues are sorted by priority, which is something that is not
         # almost never desirable. Should mixed queues with high priority as
@@ -607,18 +604,9 @@ class Worker:
         )
 
         if request_with_priority is not None:
-            dispatched_to, msg = request_with_priority
+            dispatched_to, request = request_with_priority
 
-            # Deserialize msg
-            try:
-                request = self.serializer.loads(msg)
-            except Exception:
-                logger.error(
-                    f"{timestamp()} Worker: {self.worker_id} Message from queue {dispatched_to} couldn't be deserialized."
-                )
-                return
-
-            # Process deserialized request. Could be either a Single or a Batch request.
+            # Process the request. Could be either a Single or a Batch request.
             processed = self.process_request(request, dispatched_to)
 
             if processed is None:  # error_response(-32600)
@@ -634,7 +622,7 @@ class Worker:
                 rtype = "RESULT" if "result" in processed else "ERROR"
                 if not is_notification:
                     self.clean_response(processed)
-                    self.connector.enqueue(reply_to, self.serializer.dumps(processed))
+                    self.connector.enqueue(reply_to, processed)
                     logger.debug(
                         f"{timestamp()} Worker: {self.worker_id} Sent Single {rtype} Response with id {id_} for method: {method} to queue: {reply_to}"
                     )
@@ -670,9 +658,7 @@ class Worker:
                         )
 
                 for reply_queue in batch:
-                    self.connector.enqueue(
-                        reply_queue, self.serializer.dumps(batch[reply_queue])
-                    )
+                    self.connector.enqueue(reply_queue, batch[reply_queue])
                     logger.debug(
                         f"{timestamp()} Worker: {self.worker_id} Sent Batch Response with {len(batch[reply_queue])} items to queue {reply_queue}"
                     )
@@ -684,8 +670,8 @@ class Worker:
     def run(self, timeout: float | None = None) -> None:
         """Listen and process requests, forever or for `timeout` seconds.
 
-        Any exception raised by the connector or the serializer propagates
-        and ends the loop. For a long-running service prefer `run_forever`.
+        Any exception raised by the connector propagates and ends the loop.
+        For a long-running service prefer `run_forever`.
         """
         if timeout is None or timeout <= -0.00001:
             while True:

@@ -5,7 +5,6 @@ def test_public_api_exports():
     from distributed_processing import (  # noqa: F401
         AsyncResult,
         Client,
-        DummySerializer,
         JsonSerializer,
         RemoteException,
         Worker,

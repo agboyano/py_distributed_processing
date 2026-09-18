@@ -1,6 +1,6 @@
 import logging
 
-from distributed_processing.serializers import DummySerializer, JsonSerializer
+from distributed_processing.serializers import JsonSerializer
 
 
 def test_json_serializer_round_trip():
@@ -9,13 +9,6 @@ def test_json_serializer_round_trip():
     data = s.dumps(obj)
     assert isinstance(data, bytes)
     assert s.loads(data) == obj
-
-
-def test_dummy_serializer_is_identity():
-    s = DummySerializer()
-    obj = {"anything": [1, 2, 3]}
-    assert s.dumps(obj) is obj
-    assert s.loads(obj) is obj
 
 
 def test_library_does_not_configure_logging():

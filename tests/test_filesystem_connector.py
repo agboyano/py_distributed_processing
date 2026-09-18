@@ -6,7 +6,6 @@ pytest.importorskip("fs_structs")
 
 from distributed_processing.client import Client
 from distributed_processing.filesystem_connector import FileSystemConnector
-from distributed_processing.serializers import DummySerializer
 from distributed_processing.worker import Worker
 
 
@@ -24,7 +23,7 @@ class TestFileSystemConnector:
 
     def test_registry_round_trip(self, tmp_path):
         conn = FileSystemConnector(str(tmp_path))
-        w = Worker(DummySerializer(), conn)
+        w = Worker(conn)
         w.add_requests_queue("q", {"add": lambda a, b: a + b})
         w.update_methods_registry()
 
@@ -63,7 +62,7 @@ class TestFileSystemConnector:
 
     def test_rpc_round_trip(self, tmp_path):
         worker_conn = FileSystemConnector(str(tmp_path))
-        w = Worker(DummySerializer(), worker_conn)
+        w = Worker(worker_conn)
         w.add_requests_queue("q", {"add": lambda a, b: a + b})
         w.update_methods_registry()
 
@@ -73,5 +72,5 @@ class TestFileSystemConnector:
         worker_thread.start()
 
         client_conn = FileSystemConnector(str(tmp_path))
-        client = Client(DummySerializer(), client_conn, check_registry="cache")
+        client = Client(client_conn, check_registry="cache")
         assert client.rpc_sync("add", [20, 22], timeout=10) == 42

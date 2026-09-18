@@ -24,7 +24,10 @@ transport is pluggable via **connectors**: Redis or a shared filesystem
   (`rpc_async_fn` + `Worker.add_python_eval`). **See security note.**
 - Connectors: Redis (`RedisConnector`) and filesystem
   (`FileSystemConnector`, based on `fs_structs`, waiting on watchdog
-  events or polling).
+  events or polling). The connector owns the wire encoding: Redis takes any
+  `dumps`/`loads` pair (JSON by default; `pickle`, `msgpack`...), the
+  filesystem connector stores with an `fs_structs` serializer (joblib by
+  default).
 
 ## Installation
 
@@ -43,13 +46,13 @@ for example: `pip install -e ../fs_structs`.
 Worker (one process):
 
 ```python
-from distributed_processing import Worker, JsonSerializer
+from distributed_processing import Worker
 from distributed_processing.redis_connector import RedisConnector
 
 def add(a, b):
     return a + b
 
-worker = Worker(JsonSerializer(), RedisConnector("localhost"))
+worker = Worker(RedisConnector("localhost"))
 worker.add_requests_queue("my_queue", {"add": add})
 worker.update_methods_registry()
 worker.run()          # listens indefinitely; run(timeout=60) to bound it
@@ -63,7 +66,7 @@ makes it return; use a `with Worker(...)` block, or call `close()`, so the
 worker is removed from the registry on shutdown.
 
 ```python
-with Worker(JsonSerializer(), RedisConnector("localhost")) as worker:
+with Worker(RedisConnector("localhost")) as worker:
     worker.add_requests_queue("my_queue", {"add": add})
     worker.update_methods_registry()
     worker.run_forever(backoff=(1, 60))   # retry forever; max_consecutive_errors=N to give up
@@ -72,10 +75,10 @@ with Worker(JsonSerializer(), RedisConnector("localhost")) as worker:
 Client (another process):
 
 ```python
-from distributed_processing import Client, JsonSerializer
+from distributed_processing import Client
 from distributed_processing.redis_connector import RedisConnector
 
-client = Client(JsonSerializer(), RedisConnector("localhost"))
+client = Client(RedisConnector("localhost"))
 
 client.rpc_sync("add", [1, 2])          # → 3, blocking
 
@@ -97,6 +100,43 @@ client = fsclient("/shared/path/ns")
 
 To launch a node with several workers in remotely managed subprocesses
 (create/list/kill workers via RPC), see `distributed_processing.utils.fsnode`.
+
+## Connectors and serialization
+
+`Client` and `Worker` know nothing about the wire format: they hand Python
+objects (dicts and lists) to the connector and get Python objects back. Each
+connector decides how to store them:
+
+- `RedisConnector(..., serializer=None)`: `serializer` is any object with
+  `dumps(obj) -> bytes` and `loads(bytes) -> obj`, `JsonSerializer()` by
+  default. The `pickle`, `dill` and `msgpack` modules work as they are
+  (`RedisConnector("localhost", serializer=pickle)`). The connection uses
+  `decode_responses=False`, so binary formats are safe; a message that cannot
+  be decoded is logged and skipped.
+- `FileSystemConnector(base_path, temp_dir=None, serializer=...)`: `serializer`
+  is an `fs_structs` serializer (`joblib_serializer` by default, also
+  `pickle_serializer` and `json_serializer`), the same one used for the
+  registry.
+
+Every client and worker on a namespace must use the same serializer.
+
+### Connector contract
+
+A connector is any object with these methods (duck typing, no base class);
+`tests/conftest.py:MemoryConnector` is the smallest complete example.
+
+- Names: `get_requests_queue(name) -> ref`, `requests_queue_name(ref) -> name`,
+  `get_responses_queue(client_id) -> ref`, `get_reply_to_from_id(request_id) -> ref`,
+  `get_client_id()`, `get_server_id()`.
+- Registry: `register_methods({queue_ref: {method: fn}}, worker_id)`,
+  `unregister_methods(worker_id)`, `methods_registry() -> {method: [queue_ref]}`,
+  `workers_registry() -> {queue_ref: [worker_id]}`, `all_queues_for_method(method)`,
+  `random_queue_for_method(method)`.
+- Queues, carrying Python objects: `enqueue(queue_ref, obj)`,
+  `pop(queue_ref, timeout) -> (queue_ref, obj) | None`,
+  `pop_multiple([queue_ref, ...], timeout) -> (queue_ref, obj) | None` (queues in
+  priority order), `pop_all(queue_ref) -> [obj, ...]`. `timeout <= 0` waits
+  indefinitely in `pop`/`pop_multiple`.
 
 ## Security note
 
@@ -138,7 +178,7 @@ distributed_processing/
 ├── worker.py                # Worker: queues, dispatch and method execution
 ├── async_result.py          # AsyncResult and gather()
 ├── messages.py              # message construction and validation
-├── serializers.py           # JsonSerializer, DummySerializer
+├── serializers.py           # JsonSerializer (RedisConnector default)
 ├── redis_connector.py       # Redis transport
 ├── filesystem_connector.py  # filesystem transport (fs_structs)
 ├── exceptions.py            # RemoteException

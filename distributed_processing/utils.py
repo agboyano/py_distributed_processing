@@ -12,7 +12,6 @@ import dill
 
 from .client import Client
 from .filesystem_connector import FileSystemConnector
-from .serializers import DummySerializer
 from .worker import Worker
 
 # Serialize the whole closure of the functions sent between processes.
@@ -29,8 +28,7 @@ def fsclient(
 ) -> Client:
     """Builds a Client on a filesystem namespace.
 
-    Convenience constructor for
-    `Client(DummySerializer(), FileSystemConnector(NS_PATH))`.
+    Convenience constructor for `Client(FileSystemConnector(NS_PATH))`.
 
     Args:
         NS_PATH (str): Directory shared by clients and workers.
@@ -48,7 +46,7 @@ def fsclient(
     fs_connector = FileSystemConnector(NS_PATH)
     fs_connector.with_watchdog = with_watchdog
     fs_connector.pop_watchdog_timeout = pop_watchdog_timeout
-    return Client(DummySerializer(), fs_connector, check_registry=check_registry)
+    return Client(fs_connector, check_registry=check_registry)
 
 
 def fsworker(
@@ -60,10 +58,9 @@ def fsworker(
 ) -> Worker:
     """Builds a Worker on a filesystem namespace.
 
-    Convenience constructor for
-    `Worker(DummySerializer(), FileSystemConnector(NS_PATH))`. Remember to
-    call `add_requests_queue`, `update_methods_registry` and `run` on the
-    returned Worker.
+    Convenience constructor for `Worker(FileSystemConnector(NS_PATH))`.
+    Remember to call `add_requests_queue`, `update_methods_registry` and
+    `run` on the returned Worker.
 
     Args:
         NS_PATH (str): Directory shared by clients and workers.
@@ -86,7 +83,7 @@ def fsworker(
     if clean:
         fs_connector.clean_namespace()
 
-    return Worker(DummySerializer(), fs_connector, worker_id=worker_id)
+    return Worker(fs_connector, worker_id=worker_id)
 
 
 def serialize(x: Any) -> bytes:

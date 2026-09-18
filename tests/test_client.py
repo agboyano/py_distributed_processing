@@ -3,7 +3,6 @@ from conftest import add
 
 from distributed_processing.client import Client
 from distributed_processing.exceptions import RemoteException
-from distributed_processing.serializers import JsonSerializer
 from distributed_processing.worker import Worker
 
 
@@ -35,14 +34,9 @@ class TestBasics:
     def test_notifications_cache_is_flat(self, client):
         # A response without id is cached as a notification, one item each
         # (the client stamps them with finished_time).
-        s = client.serializer
-        client._update_responses_cache([s.dumps({"result": 1})])
-        client._update_responses_cache([s.dumps({"result": 2})])
+        client._update_responses_cache([{"result": 1}])
+        client._update_responses_cache([{"result": 2}])
         assert [n["result"] for n in client.notifications] == [1, 2]
-
-    def test_parse_errors_cache_is_flat(self, client):
-        client._update_responses_cache([b"not json at all"])
-        assert client.responses_parse_errors == [b"not json at all"]
 
 
 class TestRpc:
@@ -66,7 +60,7 @@ class TestRpc:
 
     def test_rpc_async_fn_serializes_local_function(self, connector, client):
         # Worker with py_eval queue: executes dill-serialized local functions.
-        w = Worker(JsonSerializer(), connector)
+        w = Worker(connector)
         w.add_python_eval()
         w.update_methods_registry()
         client.update_registry_cache()
@@ -79,15 +73,15 @@ class TestRpc:
 class TestBatch:
     def _setup_two_workers(self, connector):
         """q1 only offers 'add'; q2 offers 'add' and 'mul'."""
-        w1 = Worker(JsonSerializer(), connector)
+        w1 = Worker(connector)
         w1.add_requests_queue("q1", {"add": add})
         w1.update_methods_registry()
 
-        w2 = Worker(JsonSerializer(), connector)
+        w2 = Worker(connector)
         w2.add_requests_queue("q2", {"add": add, "mul": lambda a, b: a * b})
         w2.update_methods_registry()
 
-        client = Client(JsonSerializer(), connector, check_registry="cache")
+        client = Client(connector, check_registry="cache")
         return w1, w2, client
 
     def test_batch_goes_to_common_queue(self, connector):
@@ -127,15 +121,15 @@ class TestBatch:
 
 class TestRegistryQueries:
     def test_all_workers_for_method_multiple_queues(self, connector):
-        w1 = Worker(JsonSerializer(), connector)
+        w1 = Worker(connector)
         w1.add_requests_queue("q1", {"add": add})
         w1.update_methods_registry()
 
-        w2 = Worker(JsonSerializer(), connector)
+        w2 = Worker(connector)
         w2.add_requests_queue("q2", {"add": add})
         w2.update_methods_registry()
 
-        client = Client(JsonSerializer(), connector, check_registry="cache")
+        client = Client(connector, check_registry="cache")
         workers = client.all_workers_for_method("add")
         assert workers == sorted([w1.worker_id, w2.worker_id])
 
