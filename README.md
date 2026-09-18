@@ -182,6 +182,32 @@ does). Instantiating a subclass that misses a primitive raises `TypeError`.
 60 lines); add the new connector to the `connector` fixture of
 `tests/test_connector.py` and the contract suite becomes its acceptance test.
 
+## Sending functions
+
+`Client.rpc_async_fn(fn, args, kwargs)` and `rpc_sync_fn` send a local Python
+function to a worker instead of calling a registered method. The function is
+serialized with `dill`, base64-encoded so it travels as a plain string, and
+sent as a request for the method `eval_py_function`. The worker must offer it
+with `Worker.add_python_eval()`, which adds the queue `py_eval` (priority 20,
+above the default 10); `add_python_eval(register=False)` keeps the queue out of
+the registry, so only clients that know its name can use it.
+
+Things to know before relying on it:
+
+- `dill` pickles a function defined in a notebook or in `__main__` **by value**:
+  it travels whole, closures included. A function imported from a module is
+  pickled **by reference**: the worker must be able to import that module, at
+  the same version. `examples/monte_carlo` puts the mapper in a module for
+  this reason.
+- Client and worker need compatible Python and `dill` versions; a mismatch
+  fails at unpickling on the worker.
+- Arguments and the result go through the connector's serializer (JSON on
+  Redis by default), with the same limits as any other request.
+- There are no batch or multi variants. To fan a function out, build the
+  params with `distributed_processing.client.serialize_python_call(fn, args, kwargs)`
+  and send them with `rpc_multi_async("eval_py_function", ...)`.
+- It executes arbitrary code on the worker. See the security note below.
+
 ## Security note
 
 `Worker.add_python_eval()` exposes `eval_py_function`, which deserializes with

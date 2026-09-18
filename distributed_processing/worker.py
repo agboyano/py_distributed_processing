@@ -29,6 +29,25 @@ def timestamp() -> str:
 logger = logging.getLogger(__name__)
 
 
+# Implementation notes.
+#
+# Counterpart of `client.serialize_python_call`. The client pickles the
+# function with dill and encodes the bytes in base64, because the request
+# params go through the connector's serializer and the default one on Redis
+# is JSON, which cannot carry bytes. So `str_fn` arrives as an ASCII str and
+# has to be base64-decoded before `dill.loads`. dill is required on this
+# side too: functions defined in a notebook or in `__main__` are pickled by
+# value and only dill can rebuild them; functions imported from a module
+# are pickled by reference and that module must be importable here, at a
+# version compatible with the client's.
+#
+# `args` and `kwargs` are the arguments of the *inner* call. They come as
+# positional params of the request, so the worker's signature check only
+# validates this function's three parameters; a mismatch with the user's
+# function surfaces as an internal error (-32603) with the remote traceback.
+#
+# SECURITY: this executes arbitrary code sent by clients. It is only
+# available on queues added with `Worker.add_python_eval`.
 def eval_py_function(
     str_fn: str, args: list | None = None, kwargs: dict | None = None
 ) -> Any:

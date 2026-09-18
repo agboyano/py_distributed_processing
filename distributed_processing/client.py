@@ -20,6 +20,25 @@ def timestamp() -> str:
     return datetime.now().isoformat()
 
 
+# Implementation notes.
+#
+# The function is pickled with dill, not pickle: dill serializes lambdas,
+# closures and functions defined in a notebook or in `__main__` by value,
+# so they travel whole. Functions imported from a module are still pickled
+# by reference, and the worker must be able to import that module.
+#
+# dill.dumps returns bytes, and the params of a request travel through the
+# connector's serializer like any other message. The default serializer on
+# Redis is JSON, which cannot carry bytes, and a future connector may use
+# any text format. Encoding the pickle in base64 and decoding to an ASCII
+# str makes the payload a plain string that every serializer accepts, at
+# the cost of about one third more size. The encoding is unconditional, even
+# when the connector could carry bytes (pickle, joblib), so the wire format
+# of `eval_py_function` requests is the same on every transport and the
+# worker only has to reverse one thing: `dill.loads(base64.b64decode(s))`.
+#
+# The result is the positional params list of the request, in the order
+# `eval_py_function(str_fn, args, kwargs)` expects.
 def serialize_python_call(
     fn: Callable, args: list | None = None, kwargs: dict | None = None
 ) -> list:
@@ -38,8 +57,6 @@ def serialize_python_call(
     args = [] if args is None else args
     kwargs = {} if kwargs is None else kwargs
     pickled_fn = dill.dumps(fn)
-    # Decoding to ascii is needed so the message stays serializable
-    # (bytes objects are not JSON serializable).
     return [base64.b64encode(pickled_fn).decode("ascii"), args, kwargs]
 
 
