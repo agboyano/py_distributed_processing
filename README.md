@@ -153,7 +153,7 @@ Rules:
 - Each call is atomic on its own and the **last write wins**: no lock and no
   expiry. Two processes doing `set_variable(name, get_variable(name) + 1)` at
   the same time may lose an update. For that use
-  `update_variable(name, fn, default=None)`: it runs `fn(current)` and stores
+  `update_variable(name, fn, default=...)`: it runs `fn(current)` and stores
   the result while holding a lock on that variable (a lock directory on the
   filesystem, a Redis lock), and returns the new value:
 
@@ -161,9 +161,11 @@ Rules:
   worker.update_variable("done", lambda n: n + 1, default=0)
   ```
 
-  Keep `fn` pure and quick (it runs with the lock held), and never write a
-  variable that is updated this way with `set_variable`, which bypasses the
-  lock. If `fn` raises, the variable is left unchanged.
+  A variable that is not set raises `KeyError` unless `default` is given
+  (`None` counts as given). Keep `fn` pure and quick (it runs with the lock
+  held), and never write a variable that is updated this way with
+  `set_variable`, which bypasses the lock. If `fn` raises, the variable is
+  left unchanged.
 - Variables live until `delete_variable` or `clean_namespace`. On Redis they
   are plain string keys (`{namespace}:variables:{name}`); on the filesystem,
   one file each under `variables/`.
@@ -203,9 +205,9 @@ only provides a few primitives. The full rules live in the docstring of
   family. `set_variable(name, value)`, `get_variable(name, default=None)`,
   `delete_variable(name) -> bool` and `variables() -> [name, ...]` (sorted).
   Copies, last write wins, not covered by the registry lock.
-  `update_variable(name, fn, default=None)` is the only read-modify-write:
+  `update_variable(name, fn, default=...)` is the only read-modify-write:
   it holds `_variable_lock(key)`, one lock per variable, and returns the
-  new value.
+  new value; `KeyError` if the variable is not set and no default is given.
 - **Names.** `get_requests_queue(name)` / `requests_queue_name(ref)` round
   trip; `get_responses_queue(client_id)`; `get_reply_to_from_id("{client_id}:{n}")`
   is the responses queue of that client.

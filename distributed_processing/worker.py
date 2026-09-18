@@ -10,7 +10,7 @@ from typing import Any, Callable
 
 import dill
 
-from .connector import Connector
+from .connector import MISSING, Connector
 from .messages import (
     ack,
     error_response,
@@ -289,12 +289,13 @@ class Worker:
         """
         return self.connector.get_variable(name, default)
 
-    def update_variable(self, name: str, fn: Callable, default: Any = None) -> Any:
+    def update_variable(self, name: str, fn: Callable, default: Any = MISSING) -> Any:
         """Atomically replaces a shared variable with `fn(current)`; returns the new value.
 
         Same as `connector.update_variable`: the read-modify-write runs
         under a per-variable lock, so several workers counting on the same
-        variable do not lose updates. Keep `fn` pure and quick.
+        variable do not lose updates. Keep `fn` pure and quick. A missing
+        variable raises `KeyError` unless `default` is given.
         """
         return self.connector.update_variable(name, fn, default)
 

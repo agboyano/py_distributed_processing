@@ -186,6 +186,17 @@ class TestVariables:
         assert connector.update_variable("n", lambda x: x + 1, default=0) == 2
         assert connector.get_variable("n") == 2
 
+    def test_update_variable_of_a_missing_variable_without_default_raises(
+        self, connector
+    ):
+        with pytest.raises(KeyError, match="missing"):
+            connector.update_variable("missing", lambda x: x + 1)
+        assert connector.variables() == []
+        # An explicit None is a valid default.
+        assert connector.update_variable("v", lambda x: [x], default=None) == [None]
+        # Once set, no default is needed.
+        assert connector.update_variable("v", lambda x: x + [1]) == [None, 1]
+
     def test_update_variable_leaves_the_value_unchanged_if_fn_raises(self, connector):
         connector.set_variable("n", 5)
 

@@ -34,6 +34,10 @@ METHOD_QUEUES = "method_queues"
 WORKERS_QUEUE = "workers_queue"
 VARIABLES = "variables"
 
+# Sentinel for "no default given" in `update_variable`, so that an explicit
+# `default=None` is still a valid default.
+MISSING = object()
+
 
 class Connector(ABC):
     """Transport contract: FIFO queues, a set store, counters and variables in a namespace.
@@ -87,12 +91,14 @@ class Connector(ABC):
         set. `delete_variable(name)` returns whether the name existed and
         `variables()` lists the names. Each call is atomic on its own and
         the last write wins: no lock and no expiry.
-        `update_variable(name, fn, default=None)` is the one atomic
+        `update_variable(name, fn, default=MISSING)` is the one atomic
         read-modify-write: it runs `fn(current)` and stores the result
         while holding `_variable_lock(key)`, a lock per variable that
         transports shared by several processes must provide (the default
-        is a no-op). A variable updated with `update_variable` must not be
-        written with `set_variable`, which bypasses the lock. Variables live
+        is a no-op). If the variable is not set, `fn` receives `default`,
+        or `KeyError` is raised when no default was given. A variable
+        updated with `update_variable` must not be written with
+        `set_variable`, which bypasses the lock. Variables live
         in their own key family, apart from the registry, and are not
         covered by `_registry_lock()`.
 
@@ -367,7 +373,7 @@ class Connector(ABC):
         except KeyError:
             return default
 
-    def update_variable(self, name: str, fn: Callable, default: Any = None) -> Any:
+    def update_variable(self, name: str, fn: Callable, default: Any = MISSING) -> Any:
         """Atomically replaces the shared variable `name` with `fn(current)`.
 
         The read, the call and the write happen while holding the lock of
@@ -379,13 +385,15 @@ class Connector(ABC):
         Args:
             name (str): Variable name.
             fn (callable): Receives the current value and returns the new one.
-            default: Value passed to `fn` when the variable is not set.
-                Defaults to None.
+            default: Value passed to `fn` when the variable is not set. If
+                not given, a missing variable raises `KeyError` instead
+                (`None` is a valid default when passed explicitly).
 
         Returns:
             The new value.
 
         Raises:
+            KeyError: If the variable is not set and no `default` was given.
             Whatever `fn` raises; the variable is then left unchanged.
                 A transport may also raise its lock error on timeout.
 
@@ -395,6 +403,10 @@ class Connector(ABC):
             try:
                 current = self._value_get(key)
             except KeyError:
+                if default is MISSING:
+                    raise KeyError(
+                        f"Variable {name!r} is not set and no default was given."
+                    ) from None
                 current = default
             new = fn(current)
             self._value_set(key, new)

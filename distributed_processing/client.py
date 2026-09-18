@@ -10,7 +10,7 @@ from typing import Any, Callable
 import dill
 
 from .async_result import AsyncResult
-from .connector import Connector
+from .connector import MISSING, Connector
 from .messages import is_ack, is_batch_response, is_single_response, single_request
 
 logger = logging.getLogger(__name__)
@@ -175,12 +175,14 @@ class Client:
         """
         return self.connector.get_variable(name, default)
 
-    def update_variable(self, name: str, fn: Callable, default: Any = None) -> Any:
+    def update_variable(self, name: str, fn: Callable, default: Any = MISSING) -> Any:
         """Atomically replaces a shared variable with `fn(current)`; returns the new value.
 
         Same as `connector.update_variable`: the read-modify-write runs
         under a per-variable lock, so concurrent updates are not lost.
-        Keep `fn` pure and quick. Example: `client.update_variable("done", lambda n: n + 1, default=0)`.
+        Keep `fn` pure and quick. A missing variable raises `KeyError`
+        unless `default` is given, e.g.
+        `client.update_variable("done", lambda n: n + 1, default=0)`.
         """
         return self.connector.update_variable(name, fn, default)
 
