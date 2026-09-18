@@ -32,9 +32,12 @@ class TestSingleRequest:
         assert "id" not in sr
         assert sr["is_notification"] is True
 
-    def test_args_and_kwargs_are_mutually_exclusive(self):
-        with pytest.raises(TypeError):
-            single_request("add", args=[1], kwargs={"b": 2}, id="c:1")
+    def test_args_and_kwargs_can_be_combined(self):
+        # Deliberate departure from JSON-RPC 2.0 (one params array OR object):
+        # both keys travel, the worker calls fn(*args, **kwargs).
+        sr = single_request("add", args=[1], kwargs={"b": 2}, id="c:1")
+        assert sr["args"] == [1]
+        assert sr["kwargs"] == {"b": 2}
 
     def test_empty_args_and_kwargs_are_dropped(self):
         sr = single_request("add", args=[], kwargs={}, id="c:1")

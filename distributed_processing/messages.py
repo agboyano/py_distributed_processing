@@ -8,6 +8,17 @@ if TYPE_CHECKING:
     from typing_extensions import TypeGuard
 
 
+# Implementation notes.
+#
+# Positional and named parameters may travel together. JSON-RPC 2.0 defines a
+# single `params` member that is either an array or an object; this library
+# departs from the spec on purpose and carries two keys, `args` and `kwargs`,
+# that can both be present in one request, like a Python call. It is safe
+# because the worker applies `fn(*args, **kwargs)` and, before that,
+# `check_params` binds the combination against the function signature: a
+# clash (the same parameter given positionally and by name, a missing or an
+# unknown one) is answered as -32602 "invalid params", not raised here. Empty
+# `args`/`kwargs` are dropped from the message so the wire format stays small.
 def single_request(
     method: str,
     args: list | None = None,
@@ -23,9 +34,10 @@ def single_request(
     Args:
         method (str): Remote function name.
         args (list, optional): Positional arguments for the remote function.
-            Defaults to None.
+            Defaults to None. May be combined with `kwargs`.
         kwargs (dict, optional): Keyword arguments for the remote function.
-            Defaults to None.
+            Defaults to None. May be combined with `args`; the worker calls
+            `fn(*args, **kwargs)`.
         id (str, optional): Request identifier. Required unless
             `is_notification` is True. Defaults to None.
         reply_to (str, optional): Response queue name to be added to the
@@ -43,8 +55,7 @@ def single_request(
             `request_sent` time.
 
     Raises:
-        TypeError: If `id` is None and `is_notification` is False, or if
-            both `args` and `kwargs` are given.
+        TypeError: If `id` is None and `is_notification` is False.
 
     """
     sr: dict = {"method": method}
@@ -72,9 +83,6 @@ def single_request(
 
     if kwargs is not None and kwargs != {}:
         sr["kwargs"] = kwargs
-
-    if "args" in sr and "kwargs" in sr:
-        raise TypeError("Only allowed either positional or named parameters")
 
     if len(options) > 0:
         sr["options"] = options

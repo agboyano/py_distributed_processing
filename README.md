@@ -280,7 +280,12 @@ networks.
 
 JSON-RPC 2.0-style messages with extensions: `reply_to` (response queue),
 `ack` (receipt confirmation), `is_notification`, `options` and `timing`/
-`metadata` (worker, queue, execution times). Standard error codes:
+`metadata` (worker, queue, execution times). Parameters travel as two keys,
+`args` (list) and `kwargs` (dict), and unlike JSON-RPC 2.0 (one `params`
+array *or* object) both may be present in one request, as in a Python call:
+the worker runs `fn(*args, **kwargs)`, and a conflict between them (the same
+parameter given twice, a missing or an unknown one) is answered with
+`-32602`. Standard error codes:
 `-32600` invalid request, `-32601` method not found, `-32602` invalid
 params (the arguments do not fit the function signature), `-32603` internal
 error (any exception raised by the function, including `TypeError`; includes

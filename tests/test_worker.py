@@ -46,6 +46,35 @@ class TestRoundTrip:
         (r,) = pop_responses(connector, "cli")
         assert r["error"]["code"] == -32602
 
+    def test_positional_and_named_params_in_one_request(self, connector):
+        def hola(nombre, calificativo="listo"):
+            return f"Hola {nombre}, eres muy {calificativo}"
+
+        w = Worker(connector)
+        w.add_requests_queue("q", {"hola": hola})
+
+        send_request(
+            connector,
+            "q",
+            single_request(
+                "hola", args=["Ana"], kwargs={"calificativo": "rápida"}, id="cli:1"
+            ),
+        )
+        w.run_once(timeout=0.1)
+        (r,) = pop_responses(connector, "cli")
+        assert r["result"] == "Hola Ana, eres muy rápida"
+
+        # The same parameter given positionally and by name is a clash that
+        # check_params reports as invalid params, not as an internal error.
+        send_request(
+            connector,
+            "q",
+            single_request("hola", args=["Ana"], kwargs={"nombre": "Eva"}, id="cli:2"),
+        )
+        w.run_once(timeout=0.1)
+        (r,) = pop_responses(connector, "cli")
+        assert r["error"]["code"] == -32602
+
     def test_registered_function_reads_a_shared_variable(self, connector):
         w = Worker(connector)
         w.add_function("q", "factor", lambda x: x * w.get_variable("k", default=1))

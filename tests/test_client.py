@@ -50,6 +50,19 @@ class TestBasics:
 
 
 class TestRpc:
+    def test_rpc_sync_combines_positional_and_named_params(self, connector, client):
+        def hola(nombre, calificativo="listo"):
+            return f"Hola {nombre}, eres muy {calificativo}"
+
+        w = Worker(connector)
+        w.add_requests_queue("saludos", {"hola": hola}, register=False)
+
+        f = client.rpc_async(
+            "hola", ["Ana"], {"calificativo": "rápida"}, queue="saludos"
+        )
+        w.run_once(timeout=0.1)
+        assert f.get(timeout=1) == "Hola Ana, eres muy rápida"
+
     def test_rpc_async_round_trip(self, connector, worker, client):
         f = client.rpc_async("add", [20, 22])
         worker.run_once(timeout=0.1)
