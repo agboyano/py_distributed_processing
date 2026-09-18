@@ -87,7 +87,7 @@ class Client:
         default_queue (str): Simple name of the default requests queue.
             Defaults to 'default'.
         timeout (float, optional): Default timeout in seconds for waiting
-            responses. Defaults to 24 * 60 * 60. If None, wait forever.
+            responses. Defaults to 5 * 60. If None, wait forever.
 
     """
 
@@ -98,7 +98,7 @@ class Client:
         check_registry: str = "cache",
         use_reply_to: bool = False,
         default_queue: str = "default",
-        timeout: float | None = 24 * 60 * 60,
+        timeout: float | None = 5 * 60,
     ):
         self.connector = connector
 
@@ -428,7 +428,10 @@ class Client:
                 `single_request` function and must have exactly three items.
             queue (str, optional): Queue to send the batch request to. Defaults to None.
                 If None, selects randomly one of the common queues available for all the methods
-                in `requests_lst`.
+                in `requests_lst` (the default queue when `check_registry` is 'never').
+                With `check_registry` 'cache' or 'always' an explicit queue must be one of
+                those common queues; with 'never' it is used as is, without consulting the
+                registry, and the worker answers -32601 for the methods it does not offer.
             retry (bool, optional): Currently ignored. Batch requests carry no
                 retry info, so they cannot be retried individually.
             ack (bool, optional): Currently ignored. The individual requests
@@ -439,32 +442,42 @@ class Client:
             list(str): List of ids of the individual sent requests.
 
         Raises:
-            ValueError: If there is no common queue for all the methods or if `queue` is not None and not included
-                in the list of common queues.
+            ValueError: If the batch is empty; or, when the registry is consulted
+                ('cache'/'always'), if there is no common queue for all the methods
+                or `queue` is not one of them.
 
         """
         if len(requests_lst) == 0:
             raise ValueError("Empty batch request.")
 
-        queue_refs_sets = [
-            set(self._all_queue_refs_for_method(x[0])) for x in requests_lst
-        ]
+        uses_registry = self.check_registry in ("cache", "always")
 
-        # The batch is processed by a single worker, so the target queue
-        # must be available for every method in the batch.
-        requests_queue_refs = list(set.intersection(*queue_refs_sets))
-
-        if len(requests_queue_refs) == 0:
-            raise ValueError("No common queue for batch request.")
-
-        if queue is not None:
+        if queue is not None and not uses_registry:
+            # 'never' means "trust the caller", as send_single_request does
+            # with an explicit queue. Intersecting here would be a fiction:
+            # without the registry every method maps to the default queue,
+            # so any other explicit queue would be rejected.
             queue_ref = self.connector.get_requests_queue(queue)
-            if queue_ref not in requests_queue_refs:
-                raise ValueError(
-                    f"{queue} not in common available queues for batch request."
-                )
         else:
-            queue_ref = random.choice(requests_queue_refs)
+            queue_refs_sets = [
+                set(self._all_queue_refs_for_method(x[0])) for x in requests_lst
+            ]
+
+            # The batch is processed by a single worker, so the target queue
+            # must be available for every method in the batch.
+            requests_queue_refs = list(set.intersection(*queue_refs_sets))
+
+            if len(requests_queue_refs) == 0:
+                raise ValueError("No common queue for batch request.")
+
+            if queue is not None:
+                queue_ref = self.connector.get_requests_queue(queue)
+                if queue_ref not in requests_queue_refs:
+                    raise ValueError(
+                        f"{queue} not in common available queues for batch request."
+                    )
+            else:
+                queue_ref = random.choice(requests_queue_refs)
 
         reply_to = None if not self.use_reply_to else self.responses_queue
 
@@ -768,7 +781,10 @@ class Client:
                 not supported: the whole batch is sent to a single common queue.
             queue (str, optional): Queue to send the batch request to. Defaults to None.
                 If None, selects randomly one of the common queues available for all the methods
-                in `requests_lst`.
+                in `requests_lst` (the default queue when `check_registry` is 'never').
+                With 'cache'/'always' an explicit queue must be one of those common queues;
+                with 'never' it is used as is and the worker answers -32601 for the
+                methods it does not offer.
             retry (bool, optional): Currently ignored. The AsyncResult objects
                 are created without retry info, so the individual requests
                 cannot be retried.

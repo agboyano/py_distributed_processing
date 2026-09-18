@@ -135,6 +135,19 @@ class TestBatch:
                 [("add", [1, 2], None), ("mul", [3, 4], None)], queue="q1"
             )
 
+    def test_never_mode_uses_explicit_queue_as_is(self, connector):
+        _, w2, _ = self._setup_two_workers(connector)
+        client = Client(connector, check_registry="never", default_queue="default")
+
+        # The registry is not consulted: q2 is used although 'nope' is
+        # served nowhere. The worker answers -32601 for it.
+        fs = client.rpc_batch_async(
+            [("add", [1, 2], None), ("nope", [1], None)], queue="q2"
+        )
+        assert connector.pop_all(connector.get_requests_queue("default")) == []
+        w2.run_once(timeout=0.1)
+        assert [f.safe_get(timeout=1) for f in fs] == [3, None]
+
     def test_rpc_batch_round_trip(self, connector):
         _, w2, client = self._setup_two_workers(connector)
         fs = client.rpc_batch_async([("add", [1, 2], None), ("mul", [3, 4], None)])
