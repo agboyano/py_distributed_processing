@@ -5,6 +5,8 @@ Each test is one rule of the contract documented in
 integration case (real directory); the Redis one runs on `FakeRedis`.
 """
 
+import threading
+
 import pytest
 from conftest import MemoryConnector
 
@@ -178,6 +180,39 @@ class TestVariables:
         connector.set_variable("b", 1)
         connector.set_variable("a", 2)
         assert connector.variables() == ["a", "b"]
+
+    def test_update_variable_uses_default_and_returns_the_new_value(self, connector):
+        assert connector.update_variable("n", lambda x: x + 1, default=0) == 1
+        assert connector.update_variable("n", lambda x: x + 1, default=0) == 2
+        assert connector.get_variable("n") == 2
+
+    def test_update_variable_leaves_the_value_unchanged_if_fn_raises(self, connector):
+        connector.set_variable("n", 5)
+
+        def boom(x):
+            raise RuntimeError("no")
+
+        with pytest.raises(RuntimeError):
+            connector.update_variable("n", boom)
+        assert connector.get_variable("n") == 5
+        # the lock was released: the next update goes through
+        assert connector.update_variable("n", lambda x: x + 1) == 6
+
+    def test_update_variable_does_not_lose_concurrent_updates(self, connector):
+        threads, per_thread = 4, 5
+
+        def count():
+            for _ in range(per_thread):
+                connector.update_variable("n", lambda x: x + 1, default=0)
+
+        workers = [threading.Thread(target=count) for _ in range(threads)]
+        for t in workers:
+            t.start()
+        for t in workers:
+            t.join()
+
+        assert connector.get_variable("n") == threads * per_thread
+        assert connector.variables() == ["n"]  # no lock shows up as a variable
 
     def test_variables_and_registry_do_not_mix(self, connector):
         q1, _ = register_two_workers(connector)

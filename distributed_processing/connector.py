@@ -19,7 +19,7 @@ from __future__ import annotations
 import logging
 import random
 from abc import ABC, abstractmethod
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from contextlib import AbstractContextManager, nullcontext
 from typing import Any
 
@@ -86,9 +86,15 @@ class Connector(ABC):
         object changes nothing shared), or `default` if the name is not
         set. `delete_variable(name)` returns whether the name existed and
         `variables()` lists the names. Each call is atomic on its own and
-        the last write wins: there is no read-modify-write, no lock and no
-        expiry. Variables live in their own key family, apart from the
-        registry, and are not covered by `_registry_lock()`.
+        the last write wins: no lock and no expiry.
+        `update_variable(name, fn, default=None)` is the one atomic
+        read-modify-write: it runs `fn(current)` and stores the result
+        while holding `_variable_lock(key)`, a lock per variable that
+        transports shared by several processes must provide (the default
+        is a no-op). A variable updated with `update_variable` must not be
+        written with `set_variable`, which bypasses the lock. Variables live
+        in their own key family, apart from the registry, and are not
+        covered by `_registry_lock()`.
 
     Atomicity
         Every public registry operation runs inside `_registry_lock()`.
@@ -210,6 +216,15 @@ class Connector(ABC):
 
     def _registry_lock(self) -> AbstractContextManager:
         "Context manager held during registry operations. No-op by default."
+        return nullcontext()
+
+    def _variable_lock(self, key: str) -> AbstractContextManager:
+        """Context manager held by `update_variable` around the read-modify-write of `key`.
+
+        No-op by default. A transport shared by several processes must
+        return a real lock, one per variable (a lock directory on the
+        filesystem, a Redis lock).
+        """
         return nullcontext()
 
     # ---- names ---------------------------------------------------------------
@@ -351,6 +366,39 @@ class Connector(ABC):
             return self._value_get(self._key(VARIABLES, name))
         except KeyError:
             return default
+
+    def update_variable(self, name: str, fn: Callable, default: Any = None) -> Any:
+        """Atomically replaces the shared variable `name` with `fn(current)`.
+
+        The read, the call and the write happen while holding the lock of
+        that variable, so concurrent updates from several processes are
+        serialized and none is lost. Keep `fn` pure and quick: it runs with
+        the lock held. Do not mix with `set_variable` on the same name, it
+        does not take the lock.
+
+        Args:
+            name (str): Variable name.
+            fn (callable): Receives the current value and returns the new one.
+            default: Value passed to `fn` when the variable is not set.
+                Defaults to None.
+
+        Returns:
+            The new value.
+
+        Raises:
+            Whatever `fn` raises; the variable is then left unchanged.
+                A transport may also raise its lock error on timeout.
+
+        """
+        key = self._key(VARIABLES, name)
+        with self._variable_lock(key):
+            try:
+                current = self._value_get(key)
+            except KeyError:
+                current = default
+            new = fn(current)
+            self._value_set(key, new)
+        return new
 
     def delete_variable(self, name: str) -> bool:
         "Deletes the shared variable `name`. Returns True if it existed."

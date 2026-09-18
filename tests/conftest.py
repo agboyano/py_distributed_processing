@@ -1,3 +1,4 @@
+import threading
 import time
 from collections import deque
 
@@ -30,6 +31,7 @@ class MemoryConnector(Connector):
         self.sets = {}  # registry key -> set of members
         self.counters = {}  # counter key -> int
         self.values = {}  # variable key -> encoded value
+        self._variables_lock = threading.Lock()  # one lock is enough in-process
 
     def clean_namespace(self):
         self.queues.clear()
@@ -62,6 +64,9 @@ class MemoryConnector(Connector):
         self.sets.pop(key, None)
 
     # --- variables ---
+    def _variable_lock(self, key):
+        return self._variables_lock
+
     def _value_set(self, key, value):
         self.values[key] = self.serializer.dumps(value)
 

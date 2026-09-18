@@ -289,6 +289,15 @@ class Worker:
         """
         return self.connector.get_variable(name, default)
 
+    def update_variable(self, name: str, fn: Callable, default: Any = None) -> Any:
+        """Atomically replaces a shared variable with `fn(current)`; returns the new value.
+
+        Same as `connector.update_variable`: the read-modify-write runs
+        under a per-variable lock, so several workers counting on the same
+        variable do not lose updates. Keep `fn` pure and quick.
+        """
+        return self.connector.update_variable(name, fn, default)
+
     def delete_variable(self, name: str) -> bool:
         "Deletes a shared variable. Returns True if it existed."
         return self.connector.delete_variable(name)

@@ -44,6 +44,7 @@ class TestBasics:
         assert client.get_variable("v") == {"a": 1}
         assert client.get_variable("missing", default=0) == 0
         assert client.variables() == ["v"]
+        assert client.update_variable("v", lambda d: {**d, "b": 2}) == {"a": 1, "b": 2}
         assert client.delete_variable("v") is True
         assert client.variables() == []
 

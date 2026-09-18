@@ -24,7 +24,8 @@ class RedisConnector(Connector):
     `pop*` methods as Python objects: the connector encodes them with
     `serializer` before storing them in Redis and decodes them on the way
     out. Shared variables (`set_variable`/`get_variable`) are encoded the
-    same way and stored as plain string keys. The connection is created with `decode_responses=False` (the
+    same way and stored as plain string keys; `update_variable` holds a
+    Redis lock (`{key}:lock`) during the read-modify-write. The connection is created with `decode_responses=False` (the
     redis-py default) so payloads reach the serializer as raw bytes; the
     connector decodes key and queue names itself. `decode_responses=True`
     would break every serializer whose output is not UTF-8 text (pickle,
@@ -41,6 +42,13 @@ class RedisConnector(Connector):
             `PickleSerializer` and `JoblibSerializer` in `serializers`; any
             module with that pair works as is (`pickle`, `dill`, `msgpack`).
             A message that `loads` cannot decode is logged and skipped.
+
+    Attributes:
+        lock_timeout (float): Seconds after which a variable lock left by a
+            dead process expires. Defaults to 60.
+        lock_blocking_timeout (float): Seconds `update_variable` waits for
+            the lock before raising `redis.exceptions.LockError`.
+            Defaults to 60.
 
     """
 
@@ -60,6 +68,8 @@ class RedisConnector(Connector):
         )
         self.namespace = namespace
         self.serializer = JsonSerializer() if serializer is None else serializer
+        self.lock_timeout: float = 60
+        self.lock_blocking_timeout: float = 60
 
     def clean_namespace(self) -> None:
         "Deletes every key of the namespace (queues, registry and counters)."
@@ -91,6 +101,17 @@ class RedisConnector(Connector):
         self.connection.delete(key)
 
     # ---- variables (plain string keys, encoded with the serializer) ----------
+
+    def _variable_lock(self, key: str):
+        # redis-py Lock: SET NX with expiry, released by a Lua script that
+        # checks the token; a context manager that raises LockError on
+        # blocking_timeout. Simpler than WATCH/MULTI and it matches the
+        # filesystem connector (one lock per variable).
+        return self.connection.lock(
+            f"{key}:lock",
+            timeout=self.lock_timeout,
+            blocking_timeout=self.lock_blocking_timeout,
+        )
 
     def _value_set(self, key: str, value: Any) -> None:
         self.connection.set(key, self.serializer.dumps(value))

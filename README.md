@@ -150,10 +150,20 @@ Rules:
   Redis with the default `JsonSerializer` they must be JSON-encodable, as any
   request). Mutating what `get_variable` returns changes nothing; call
   `set_variable` again.
-- Each call is atomic on its own and the **last write wins**. There is no
-  read-modify-write, no lock and no expiry: two processes doing
-  `set_variable(name, get_variable(name) + 1)` at the same time may lose an
-  update. Use a request to a single worker if you need that.
+- Each call is atomic on its own and the **last write wins**: no lock and no
+  expiry. Two processes doing `set_variable(name, get_variable(name) + 1)` at
+  the same time may lose an update. For that use
+  `update_variable(name, fn, default=None)`: it runs `fn(current)` and stores
+  the result while holding a lock on that variable (a lock directory on the
+  filesystem, a Redis lock), and returns the new value:
+
+  ```python
+  worker.update_variable("done", lambda n: n + 1, default=0)
+  ```
+
+  Keep `fn` pure and quick (it runs with the lock held), and never write a
+  variable that is updated this way with `set_variable`, which bypasses the
+  lock. If `fn` raises, the variable is left unchanged.
 - Variables live until `delete_variable` or `clean_namespace`. On Redis they
   are plain string keys (`{namespace}:variables:{name}`); on the filesystem,
   one file each under `variables/`.
@@ -193,6 +203,9 @@ only provides a few primitives. The full rules live in the docstring of
   family. `set_variable(name, value)`, `get_variable(name, default=None)`,
   `delete_variable(name) -> bool` and `variables() -> [name, ...]` (sorted).
   Copies, last write wins, not covered by the registry lock.
+  `update_variable(name, fn, default=None)` is the only read-modify-write:
+  it holds `_variable_lock(key)`, one lock per variable, and returns the
+  new value.
 - **Names.** `get_requests_queue(name)` / `requests_queue_name(ref)` round
   trip; `get_responses_queue(client_id)`; `get_reply_to_from_id("{client_id}:{n}")`
   is the responses queue of that client.
@@ -217,9 +230,11 @@ Subclass `Connector`, set `sep` and `id_prefix`, and implement:
   the connector's serializer, as the queues do.
 - The queues: `enqueue`, `pop`, `pop_multiple`, `pop_all`, with the semantics above.
 
-Override `_key(*parts)` if keys need a namespace prefix (Redis does) and
+Override `_key(*parts)` if keys need a namespace prefix (Redis does),
 `_registry_lock()` if the set store is not atomic on its own (the filesystem
-does). Instantiating a subclass that misses a primitive raises `TypeError`.
+does) and `_variable_lock(key)` with a real per-variable lock whenever
+several processes share the transport (both do; the default is a no-op).
+Instantiating a subclass that misses a primitive raises `TypeError`.
 `tests/conftest.py:MemoryConnector` is the smallest complete example (about
 75 lines); add the new connector to the `connector` fixture of
 `tests/test_connector.py` and the contract suite becomes its acceptance test.

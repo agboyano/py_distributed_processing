@@ -107,9 +107,9 @@ class FileSystemConnector(Connector):
 
     # ---- primitives ----------------------------------------------------------
 
-    def _lock(self, name: str):
+    def _lock(self, name: str, base_path=None):
         return fs_structs.structs.lock_context(
-            self.registry.base_path,
+            self.registry.base_path if base_path is None else base_path,
             name,
             self.lock_registry_timeout,
             self.lock_registry_watchdog_timeout,
@@ -150,6 +150,34 @@ class FileSystemConnector(Connector):
             pass
 
     # ---- variables (own udict, one file per variable) ------------------------
+
+    # Implementation notes.
+    #
+    # `variables_store` is a plain `FSUDict`: one file per variable, named
+    # after the key, in the directory `udict_variables`. No lock is taken.
+    # `FSUDict.__setitem__` writes the value to `temp_dir` and renames it
+    # onto the final name, and the rename is atomic on local disks, SMB and
+    # NFS (see the notes above `FSUDict` in fs_structs). So a `set_variable`
+    # never blocks the dict nor other variables, and a concurrent reader
+    # gets the old value or the new one, never a partial file. `_value_get`
+    # is one file read and `_value_delete` one unlink, each atomic on its
+    # own.
+    #
+    # What is NOT atomic is a read-modify-write across two calls
+    # (`set_variable(n, get_variable(n) + 1)`): two processes may both read
+    # the old value and one update is lost. The connector contract states
+    # "last write wins" for that reason. Unlike the registry (`_registry_lock`,
+    # a single lock for the whole set store) and the id counters (`_incr`,
+    # one lock per counter), plain sets and gets are lock-free by design:
+    # the common use is one writer publishing a parameter and many readers.
+    #
+    # `update_variable` is the exception: `_variable_lock` returns a lock
+    # directory `{key}_lock.lock` inside `udict_variables`, one per
+    # variable, with the same timeouts and `max_age` as the registry lock
+    # (the `_incr` pattern). `FSUDict.keys()` ignores directories, so the
+    # lock never shows up in `variables()`.
+    def _variable_lock(self, key: str):
+        return self._lock(f"{key}_lock", self.variables_store.base_path)
 
     def _value_set(self, key: str, value: Any) -> None:
         self.variables_store[key] = value

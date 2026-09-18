@@ -175,6 +175,15 @@ class Client:
         """
         return self.connector.get_variable(name, default)
 
+    def update_variable(self, name: str, fn: Callable, default: Any = None) -> Any:
+        """Atomically replaces a shared variable with `fn(current)`; returns the new value.
+
+        Same as `connector.update_variable`: the read-modify-write runs
+        under a per-variable lock, so concurrent updates are not lost.
+        Keep `fn` pure and quick. Example: `client.update_variable("done", lambda n: n + 1, default=0)`.
+        """
+        return self.connector.update_variable(name, fn, default)
+
     def delete_variable(self, name: str) -> bool:
         "Deletes a shared variable. Returns True if it existed."
         return self.connector.delete_variable(name)

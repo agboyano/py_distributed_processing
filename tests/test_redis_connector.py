@@ -5,6 +5,7 @@ semantics) is checked in `test_connector.py`.
 """
 
 import pickle
+import threading
 
 import pytest
 
@@ -25,6 +26,7 @@ class FakeRedis:
         self.lists = {}
         self.counters = {}
         self.strings = {}
+        self.locks = {}
 
     @property
     def _stores(self):
@@ -52,6 +54,11 @@ class FakeRedis:
     def exists(self, key):
         key = self._key(key)
         return int(any(key in store for store in self._stores))
+
+    # --- locks (update_variable) ---
+    def lock(self, name, **kwargs):
+        # A threading.Lock stands in for redis.lock.Lock: both are context managers.
+        return self.locks.setdefault(self._key(name), threading.Lock())
 
     # --- strings (variables) ---
     def set(self, key, value):

@@ -57,6 +57,7 @@ class TestRoundTrip:
         (r,) = pop_responses(connector, "cli")
         assert r["result"] == 40
         assert w.variables() == ["k"]
+        assert w.update_variable("done", lambda n: n + 1, default=0) == 1
         assert w.delete_variable("k") is True
 
     def test_type_error_inside_function_is_internal_error(self, connector):
