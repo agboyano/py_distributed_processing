@@ -382,7 +382,7 @@ fs[4].retry()
 
 # %%
 # [f.retry() for f in fs if not f.done()]
-# no hace falta chequear si está pendiente.
+# no need to check whether it is still pending.
 [f.retry() for f in fs]
 
 # %%

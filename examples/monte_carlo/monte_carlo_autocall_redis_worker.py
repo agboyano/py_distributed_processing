@@ -41,4 +41,8 @@ if __name__ == "__main__":
 
     server.update_methods_registry()
 
+    # run() stops with a traceback on the first connector error, which is what
+    # you want while developing. For a worker deployed as a service use
+    # run_forever(): errors are logged and retried with exponential backoff.
     server.run()
+    # server.run_forever(backoff=(1, 60))

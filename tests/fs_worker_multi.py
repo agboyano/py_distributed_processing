@@ -59,18 +59,18 @@ def worker1(worker_id=None, watchdog_timeout=60):
 
     server.add_requests_queue("cola_2", func_dict2)
 
-    # Truco
-    # Añado una cola que proporciona todas las funciones anteriores.
-    # La llamo como el worker y le doy prioridad 100.
-    # NO LA PUBLICO.
-    # La utilizo para hacer llamadas directas al worker, saltándome las colas.
+    # Trick
+    # Add a queue that offers every function above.
+    # Named after the worker, with priority 100.
+    # NOT PUBLISHED.
+    # Used to call the worker directly, bypassing the queues.
     server.add_requests_queue(
         server.worker_id, dict(func_dict0, **func_dict1, **func_dict2), 100, False
     )
-    # añado también el método eval_py_function a la cola anterior
+    # also add the eval_py_function method to that queue
     server.add_python_eval(server.worker_id)
 
-    # creo cola "py_eval" con método eval_py_function
+    # create the "py_eval" queue with the eval_py_function method
     server.add_python_eval()
     server.update_methods_registry()
     return server

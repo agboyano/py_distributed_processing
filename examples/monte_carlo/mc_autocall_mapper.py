@@ -4,14 +4,14 @@ from math import exp, sqrt
 import numpy as np
 from numpy.random import PCG64, Generator
 
-# Multiprocessing con números aleatorios paralelos basados en RandomState
-# RandomState se ha quedado anticuado y utilza el generador MT19937
-# que es más lento que el generador ahora por defecto en numpy PGC64
+# Multiprocessing with parallel random numbers based on RandomState
+# RandomState is legacy and uses the MT19937 generator,
+# which is slower than PCG64, the current numpy default
 
 
 def new_price(S_t, v, r, t1, t2):
     T = (t2 - t1) / 365.0
-    # no hay diferencia con gauss
+    # no difference with gauss
     return S_t * exp((r - 0.5 * v * v) * T + v * sqrt(T) * np.random.randn())
 
 
@@ -19,9 +19,9 @@ def df(r, t1, t2):
     return exp(-r * (t2 - t1) / 365.0)
 
 
-# Multiprocessing con números aleatorios paralelos basados en RandomState
-# RandomState se ha quedado anticuado y además utilza el generador MT19937
-# que es más lento que el generador ahora por defecto en numpy PGC64
+# Multiprocessing with parallel random numbers based on RandomState
+# RandomState is legacy and uses the MT19937 generator,
+# which is slower than PCG64, the current numpy default
 
 def mc_autocall_mapper(nsimulations,
                        v,
@@ -34,8 +34,8 @@ def mc_autocall_mapper(nsimulations,
 
     assert(coupon_barrier >= protection_barrier)
 
-    # Hay que tener cuidado con la desserialización desde json.
-    # En json son todo flotantes.
+    # Careful with the deserialization from JSON:
+    # every number is a float in JSON.
     nsimulations = int(nsimulations)
 
     S = 1.0
@@ -56,7 +56,7 @@ def mc_autocall_mapper(nsimulations,
 
     rnd = np.random.RandomState().randn(nsimulations, len(dates)-1)
 
-    # muy importante RandomState() para multiproceso ya que reinicializa la semilla
+    # RandomState() matters for multiprocessing: it reseeds in every process
     # numpy.random.RandomState(seed=None)
     # If seed is None, then the MT19937 BitGenerator is initialized by reading data from /dev/urandom
     # (or the Windows analogue) if available or seed from the clock otherwise.
@@ -86,8 +86,8 @@ def mc_autocall_mapper(nsimulations,
 
 NSIMULATIONS = 1000000
 
-V = 0.20  # Volatilidad
-R = 0.04  # Interés instantáneo (ln(1+r)?)
+V = 0.20  # Volatility
+R = 0.04  # Instantaneous rate (ln(1+r)?)
 COUPON_BARRIER = 0.8
 KICKOUT_BARRIER = 1.1
 PROTECTION_BARRIER = 0.6
@@ -103,8 +103,8 @@ obs_dates = [datetime.datetime(2012, 7, 4, 0, 0),
 
 dates = [int((t-obs_dates[0]).days) for t in obs_dates]
 
-# Para pasar a multiprocessing. Si no da problemas en los
-# notebooks de Jupyter en windows.
+# Wrapper for multiprocessing. Otherwise Jupyter notebooks on
+# Windows have trouble serializing the function.
 
 
 def f(nsimulations):
@@ -118,8 +118,8 @@ def f(nsimulations):
                               dates=dates)
 
 
-# Versión basada en PGC64. Hay que pasar a la función la semilla y el número de salto.
-# Basado en https://numpy.org/doc/1.18/reference/random/parallel.html
+# PCG64-based version. The function receives the seed and the jump number.
+# Based on https://numpy.org/doc/1.18/reference/random/parallel.html
 
 def mc_autocall_mapper2(rndg, nsimulations,
                    v=V,
@@ -135,8 +135,8 @@ def mc_autocall_mapper2(rndg, nsimulations,
 
     assert(coupon_barrier >= protection_barrier)
 
-    # Hay que tener cuidado con la desserialización desde json.
-    # En json son todo flotantes.
+    # Careful with the deserialization from JSON:
+    # every number is a float in JSON.
     nsimulations = int(nsimulations)
 
     S = 1.0

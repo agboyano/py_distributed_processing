@@ -22,7 +22,7 @@ import logging
 logging.getLogger("distributed_processing").setLevel(logging.DEBUG)
 
 # %%
-# clean = True limpia namespace. Por defecto, False
+# clean=True wipes the namespace. Defaults to False
 def _mp_worker_wrapper(serialized_func, serialized_args, serialized_kwargs, result_queue=None):
     """
     Global wrapper: deserialize function & arguments, call function,

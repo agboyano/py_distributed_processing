@@ -100,7 +100,12 @@ def _create_worker(serialized_worker_constructor, args, kwargs, id, shared_dict)
     worker_constructor = deserialize(serialized_worker_constructor)
     worker = worker_constructor(*args, **kwargs)
     shared_dict[id] = worker.worker_id
-    worker.run()
+    # These subprocesses are unattended workers in a real deployment, so use
+    # `run_forever`: connector errors (shared drive not responding, lock
+    # timeout, corrupt message...) are logged and retried with backoff instead
+    # of killing the subprocess. `run` is meant for development (notebooks,
+    # tests), where an exception stopping the loop with a traceback is useful.
+    worker.run_forever()
 
 
 def fsnode(
@@ -118,7 +123,7 @@ def fsnode(
     `worker_id` and exposes these methods, callable remotely via RPC:
 
     - `create_worker(worker_type, args, kwargs)`: starts a new subprocess
-      running `workers_constructors[worker_type](*args, **kwargs).run()`.
+      running `workers_constructors[worker_type](*args, **kwargs).run_forever()`.
       Returns (pid, worker_type, worker_id), or (None, None, None) if the
       worker did not start within `creation_processes_timeout`.
     - `list_processes()`: returns [(pid, worker_type, worker_id), ...] of
