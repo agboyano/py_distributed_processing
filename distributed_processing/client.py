@@ -798,25 +798,32 @@ class Client:
         ids = self.send_batch_request(requests_lst, queue=queue, retry=retry, ack=ack)
         return [AsyncResult(self, id) for id in ids]
 
-    def rpc_batch_sync(self, requests_lst: list, timeout: float | None = None) -> list:
+    def rpc_batch_sync(
+        self,
+        requests_lst: list,
+        timeout: float | None = None,
+        queue: str | None = None,
+    ) -> list:
         """Sends a synchronous batch request that will be executed by a single worker.
 
-        Waits for the results.
-        Uses safe_get, if there's an error in a function, returns None.
+        Waits for the results with `safe_get`: a remote error or a timeout
+        on an individual request gives None for that request.
 
         Args:
-            requests_lst (list): List of tuples [(fname, args, kwargs), ...]
+            requests_lst (list): List of tuples [(method, args, kwargs), ...]
             timeout (float, optional): Defaults to None (self.timeout).
                 If 0, check queue once.
+            queue (str, optional): Queue to send the batch request to.
+                Defaults to None. Same rules as `rpc_batch_async`.
 
         Returns:
-            list: List of (results or None on error)
+            list: List of (results or None on error or timeout)
 
         Raises:
-            TimeoutError
+            ValueError: See `send_batch_request`.
 
         """
-        fs = self.rpc_batch_async(requests_lst)
+        fs = self.rpc_batch_async(requests_lst, queue=queue)
         return [f.safe_get(timeout=timeout) for f in fs]
 
     def rpc_multi_async(

@@ -1,3 +1,5 @@
+import threading
+
 import pytest
 from conftest import add
 
@@ -147,6 +149,17 @@ class TestBatch:
         assert connector.pop_all(connector.get_requests_queue("default")) == []
         w2.run_once(timeout=0.1)
         assert [f.safe_get(timeout=1) for f in fs] == [3, None]
+
+    def test_rpc_batch_sync_accepts_a_queue(self, connector):
+        _, w2, client = self._setup_two_workers(connector)
+        t = threading.Thread(target=w2.run, kwargs={"timeout": 2}, daemon=True)
+        t.start()
+        try:
+            assert client.rpc_batch_sync(
+                [("add", [1, 2], None), ("mul", [3, 4], None)], timeout=2, queue="q2"
+            ) == [3, 12]
+        finally:
+            t.join()
 
     def test_rpc_batch_round_trip(self, connector):
         _, w2, client = self._setup_two_workers(connector)
