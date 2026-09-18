@@ -1,11 +1,12 @@
 """Base class and behavioural contract for transports (connectors).
 
-A connector gives `Client` and `Worker` three things inside a *namespace*:
+A connector gives `Client` and `Worker` four things inside a *namespace*:
 
 - FIFO queues of Python objects (requests and responses),
 - a small set store for the registry (which queues serve each method and
   which workers listen on each queue),
-- two counters, for unique client and worker ids.
+- two counters, for unique client and worker ids,
+- a key/value store of shared variables (`set_variable`/`get_variable`).
 
 `Connector` implements naming and the registry once, on top of a handful of
 primitives that each transport provides. The class docstring states the
@@ -27,12 +28,15 @@ logger = logging.getLogger(__name__)
 # Key families of the registry (set store):
 #   {METHOD_QUEUES}{sep}{method}    -> {queue_ref, ...}  queues serving a method
 #   {WORKERS_QUEUE}{sep}{queue_ref} -> {worker_id, ...}  workers listening on a queue
+# Key family of the shared variables (value store):
+#   {VARIABLES}{sep}{name}          -> value
 METHOD_QUEUES = "method_queues"
 WORKERS_QUEUE = "workers_queue"
+VARIABLES = "variables"
 
 
 class Connector(ABC):
-    """Transport contract: FIFO queues, a set store and counters in a namespace.
+    """Transport contract: FIFO queues, a set store, counters and variables in a namespace.
 
     Subclasses implement the primitives (the abstract methods) and inherit
     the naming scheme and the registry. `Client` and `Worker` only use the
@@ -74,6 +78,18 @@ class Connector(ABC):
         lists (snapshots). `random_queue_for_method` returns None when no
         queue serves the method.
 
+    Variables
+        `set_variable(name, value)` stores a Python object under `name`,
+        shared by every client and worker of the namespace.
+        `get_variable(name, default=None)` returns a *copy* of it (the
+        value travels through the serializer, so mutating the returned
+        object changes nothing shared), or `default` if the name is not
+        set. `delete_variable(name)` returns whether the name existed and
+        `variables()` lists the names. Each call is atomic on its own and
+        the last write wins: there is no read-modify-write, no lock and no
+        expiry. Variables live in their own key family, apart from the
+        registry, and are not covered by `_registry_lock()`.
+
     Atomicity
         Every public registry operation runs inside `_registry_lock()`.
         Transports whose set primitives are atomic by themselves (Redis)
@@ -83,13 +99,13 @@ class Connector(ABC):
         message to exactly one consumer.
 
     Namespaces
-        `clean_namespace` deletes queues, registry and counters, so ids
-        start again from 1.
+        `clean_namespace` deletes queues, registry, counters and variables,
+        so ids start again from 1.
 
     Encoding
-        Queues carry Python objects. The connector owns the encoding (its
-        serializer); every client and worker of a namespace must use the
-        same one.
+        Queues and variables carry Python objects. The connector owns the
+        encoding (its serializer); every client and worker of a namespace
+        must use the same one.
 
     Attributes:
         sep (str): Separator used to build keys and queue references.
@@ -133,6 +149,22 @@ class Connector(ABC):
     @abstractmethod
     def _set_delete(self, key: str) -> None:
         "Deletes the set `key`. No error if it does not exist."
+
+    @abstractmethod
+    def _value_set(self, key: str, value: Any) -> None:
+        "Stores the Python object `value` under `key`, replacing any previous one."
+
+    @abstractmethod
+    def _value_get(self, key: str) -> Any:
+        "Returns the object stored under `key`. Raises KeyError if there is none."
+
+    @abstractmethod
+    def _value_delete(self, key: str) -> bool:
+        "Deletes `key`. Returns True if it existed, False otherwise."
+
+    @abstractmethod
+    def _value_keys(self, prefix: str) -> list[str]:
+        "Returns the keys of every stored value whose name starts with `prefix`."
 
     @abstractmethod
     def enqueue(self, queue: str, msg: Any) -> None:
@@ -287,3 +319,44 @@ class Connector(ABC):
         "Returns a random queue ref serving `method`, or None if there is none."
         available = self.all_queues_for_method(method)
         return random.choice(available) if available else None
+
+    # ---- variables -----------------------------------------------------------
+
+    def set_variable(self, name: str, value: Any) -> None:
+        """Stores `value` under `name`, shared by the whole namespace.
+
+        The value goes through the connector's serializer, so it must be
+        encodable by it (JSON on Redis by default). The last write wins.
+
+        Args:
+            name (str): Variable name.
+            value: Python object to share.
+
+        """
+        self._value_set(self._key(VARIABLES, name), value)
+
+    def get_variable(self, name: str, default: Any = None) -> Any:
+        """Returns a copy of the shared variable `name`, or `default` if not set.
+
+        Mutating the returned object does not change the shared value: call
+        `set_variable` again to publish a change.
+
+        Args:
+            name (str): Variable name.
+            default: Value returned when the variable is not set.
+                Defaults to None.
+
+        """
+        try:
+            return self._value_get(self._key(VARIABLES, name))
+        except KeyError:
+            return default
+
+    def delete_variable(self, name: str) -> bool:
+        "Deletes the shared variable `name`. Returns True if it existed."
+        return self._value_delete(self._key(VARIABLES, name))
+
+    def variables(self) -> list[str]:
+        "Returns the names of every shared variable, sorted."
+        prefix = self._key(VARIABLES) + self.sep
+        return sorted(key.removeprefix(prefix) for key in self._value_keys(prefix))

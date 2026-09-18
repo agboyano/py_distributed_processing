@@ -29,11 +29,13 @@ class MemoryConnector(Connector):
         self.queues = {}  # queue_ref -> deque of encoded messages
         self.sets = {}  # registry key -> set of members
         self.counters = {}  # counter key -> int
+        self.values = {}  # variable key -> encoded value
 
     def clean_namespace(self):
         self.queues.clear()
         self.sets.clear()
         self.counters.clear()
+        self.values.clear()
 
     # --- primitives ---
     def _incr(self, key):
@@ -58,6 +60,19 @@ class MemoryConnector(Connector):
 
     def _set_delete(self, key):
         self.sets.pop(key, None)
+
+    # --- variables ---
+    def _value_set(self, key, value):
+        self.values[key] = self.serializer.dumps(value)
+
+    def _value_get(self, key):
+        return self.serializer.loads(self.values[key])
+
+    def _value_delete(self, key):
+        return self.values.pop(key, None) is not None
+
+    def _value_keys(self, prefix):
+        return [k for k in self.values if k.startswith(prefix)]
 
     # --- queues ---
     def enqueue(self, queue, msg):

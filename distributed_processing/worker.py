@@ -263,6 +263,40 @@ class Worker:
             )
         # remember to call self.update_methods_registry() afterwards
 
+    # ---- shared variables (delegated to the connector) -----------------------
+
+    def set_variable(self, name: str, value: Any) -> None:
+        """Stores a variable shared by every client and worker of the namespace.
+
+        Same as `connector.set_variable`. The value goes through the
+        connector's serializer and the last write wins.
+
+        Args:
+            name (str): Variable name.
+            value: Python object to share.
+
+        """
+        self.connector.set_variable(name, value)
+
+    def get_variable(self, name: str, default: Any = None) -> Any:
+        """Returns a copy of a shared variable, or `default` if it is not set.
+
+        Same as `connector.get_variable`. A registered function does not
+        receive the worker, so it reads variables through a closure:
+
+            worker.add_function("q", "price", lambda isin: price(isin, worker.get_variable("valuation_date")))
+
+        """
+        return self.connector.get_variable(name, default)
+
+    def delete_variable(self, name: str) -> bool:
+        "Deletes a shared variable. Returns True if it existed."
+        return self.connector.delete_variable(name)
+
+    def variables(self) -> list:
+        "Returns the sorted names of the shared variables."
+        return self.connector.variables()
+
     def update_methods_registry(self) -> None:
         "Publishes the queues and methods added with `register=True`."
         queues_to_register = {

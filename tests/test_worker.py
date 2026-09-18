@@ -46,6 +46,19 @@ class TestRoundTrip:
         (r,) = pop_responses(connector, "cli")
         assert r["error"]["code"] == -32602
 
+    def test_registered_function_reads_a_shared_variable(self, connector):
+        w = Worker(connector)
+        w.add_function("q", "factor", lambda x: x * w.get_variable("k", default=1))
+        connector.set_variable("k", 10)  # as a client would do
+
+        send_request(connector, "q", single_request("factor", args=[4], id="cli:1"))
+        w.run_once(timeout=0.1)
+
+        (r,) = pop_responses(connector, "cli")
+        assert r["result"] == 40
+        assert w.variables() == ["k"]
+        assert w.delete_variable("k") is True
+
     def test_type_error_inside_function_is_internal_error(self, connector):
         def bad_concat(x):
             return "a" + x  # TypeError raised *inside* the function

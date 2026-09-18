@@ -28,6 +28,9 @@ transport is pluggable via **connectors**: Redis or a shared filesystem
   `dumps`/`loads` pair (JSON by default; `pickle`, `msgpack`...), the
   filesystem connector stores with an `fs_structs` serializer (joblib by
   default).
+- Shared variables: `set_variable` / `get_variable` on the connector, the
+  client and the worker, to publish a parameter once instead of sending it
+  with every request.
 
 ## Installation
 
@@ -124,6 +127,37 @@ connector decides how to store them:
 
 Every client and worker on a namespace must use the same serializer.
 
+### Shared variables
+
+Besides queues, a namespace holds a small key/value store that every client
+and worker can read and write. `Client` and `Worker` expose it with the same
+four methods as the connector:
+
+```python
+client.set_variable("valuation_date", "2026-09-18")
+client.get_variable("valuation_date")            # '2026-09-18'
+client.get_variable("missing", default=0)        # 0
+client.variables()                               # ['valuation_date']
+client.delete_variable("valuation_date")         # True
+
+# On the worker side a registered function reads it through a closure:
+worker.add_function("q", "price", lambda isin: price(isin, worker.get_variable("valuation_date")))
+```
+
+Rules:
+
+- Values are **copies**: they go through the connector's serializer (so on
+  Redis with the default `JsonSerializer` they must be JSON-encodable, as any
+  request). Mutating what `get_variable` returns changes nothing; call
+  `set_variable` again.
+- Each call is atomic on its own and the **last write wins**. There is no
+  read-modify-write, no lock and no expiry: two processes doing
+  `set_variable(name, get_variable(name) + 1)` at the same time may lose an
+  update. Use a request to a single worker if you need that.
+- Variables live until `delete_variable` or `clean_namespace`. On Redis they
+  are plain string keys (`{namespace}:variables:{name}`); on the filesystem,
+  one file each under `variables/`.
+
 ### Connector contract
 
 A connector is a subclass of `distributed_processing.Connector`. The base
@@ -153,8 +187,12 @@ only provides a few primitives. The full rules live in the docstring of
   (`None` if no queue serves it) read it.
 - **Two counters** for unique ids. `get_client_id()` / `get_server_id()`
   return `{id_prefix}_client{sep}{n}` / `{id_prefix}_server{sep}{n}`; ids are
-  never reused until `clean_namespace()`, which deletes queues, registry and
-  counters.
+  never reused until `clean_namespace()`, which deletes queues, registry,
+  counters and variables.
+- **Shared variables**, a key/value store of Python objects in its own key
+  family. `set_variable(name, value)`, `get_variable(name, default=None)`,
+  `delete_variable(name) -> bool` and `variables() -> [name, ...]` (sorted).
+  Copies, last write wins, not covered by the registry lock.
 - **Names.** `get_requests_queue(name)` / `requests_queue_name(ref)` round
   trip; `get_responses_queue(client_id)`; `get_reply_to_from_id("{client_id}:{n}")`
   is the responses queue of that client.
@@ -173,13 +211,17 @@ Subclass `Connector`, set `sep` and `id_prefix`, and implement:
 - The set store: `_set_add(key, members)`, `_set_discard(key, members) -> int`
   (how many were present), `_set_members(key) -> set`, `_set_keys(prefix) -> list`,
   `_set_delete(key)`.
+- The value store: `_value_set(key, value)`, `_value_get(key)` (raises
+  `KeyError` if missing), `_value_delete(key) -> bool` (whether it existed),
+  `_value_keys(prefix) -> list`. Values are Python objects: encode them with
+  the connector's serializer, as the queues do.
 - The queues: `enqueue`, `pop`, `pop_multiple`, `pop_all`, with the semantics above.
 
 Override `_key(*parts)` if keys need a namespace prefix (Redis does) and
 `_registry_lock()` if the set store is not atomic on its own (the filesystem
 does). Instantiating a subclass that misses a primitive raises `TypeError`.
 `tests/conftest.py:MemoryConnector` is the smallest complete example (about
-60 lines); add the new connector to the `connector` fixture of
+75 lines); add the new connector to the `connector` fixture of
 `tests/test_connector.py` and the contract suite becomes its acceptance test.
 
 ## Sending functions

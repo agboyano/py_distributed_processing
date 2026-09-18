@@ -149,12 +149,55 @@ class TestQueues:
         assert connector.pop_all("q") == []
 
 
+class TestVariables:
+    def test_set_get_round_trip_of_a_python_object(self, connector):
+        connector.set_variable("params", {"a": [1, 2], "b": "x"})
+        assert connector.get_variable("params") == {"a": [1, 2], "b": "x"}
+
+    def test_get_returns_a_copy(self, connector):
+        connector.set_variable("v", {"n": 1})
+        connector.get_variable("v")["n"] = 2
+        assert connector.get_variable("v") == {"n": 1}
+
+    def test_missing_variable_returns_default(self, connector):
+        assert connector.get_variable("nope") is None
+        assert connector.get_variable("nope", default=0) == 0
+
+    def test_last_write_wins(self, connector):
+        connector.set_variable("v", 1)
+        connector.set_variable("v", 2)
+        assert connector.get_variable("v") == 2
+
+    def test_delete_reports_whether_it_existed(self, connector):
+        connector.set_variable("v", 1)
+        assert connector.delete_variable("v") is True
+        assert connector.delete_variable("v") is False
+        assert connector.get_variable("v") is None
+
+    def test_variables_lists_sorted_names_without_prefix(self, connector):
+        connector.set_variable("b", 1)
+        connector.set_variable("a", 2)
+        assert connector.variables() == ["a", "b"]
+
+    def test_variables_and_registry_do_not_mix(self, connector):
+        q1, _ = register_two_workers(connector)
+        connector.set_variable("add", "not a method")
+        assert connector.variables() == ["add"]
+        assert sorted(connector.all_queues_for_method("add")) == sorted(
+            connector.methods_registry()["add"]
+        )
+        connector.unregister_methods("w1")
+        connector.unregister_methods("w2")
+        assert connector.get_variable("add") == "not a method"
+
+
 class TestNamespace:
     def test_clean_namespace_resets_registry_and_ids(self, connector):
         q1, _ = register_two_workers(connector)
         first = connector.get_client_id()
         connector.enqueue(q1, 1)
         connector.enqueue(connector.get_responses_queue(first), 2)
+        connector.set_variable("v", 1)
 
         connector.clean_namespace()
 
@@ -163,6 +206,8 @@ class TestNamespace:
         assert connector.pop_all(q1) == []
         assert connector.pop_all(connector.get_responses_queue(first)) == []
         assert connector.get_client_id() == first
+        assert connector.get_variable("v") is None
+        assert connector.variables() == []
 
 
 def test_subclass_missing_a_primitive_cannot_be_instantiated():

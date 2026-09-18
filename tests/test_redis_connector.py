@@ -24,6 +24,11 @@ class FakeRedis:
         self.sets = {}
         self.lists = {}
         self.counters = {}
+        self.strings = {}
+
+    @property
+    def _stores(self):
+        return (self.sets, self.lists, self.counters, self.strings)
 
     @staticmethod
     def _key(key):
@@ -32,7 +37,7 @@ class FakeRedis:
     # --- keys ---
     def scan_iter(self, pattern):
         prefix = pattern[:-1]  # patterns are always "{prefix}*"
-        for store in (self.sets, self.lists, self.counters):
+        for store in self._stores:
             for key in list(store):
                 if key.startswith(prefix):
                     yield key.encode("utf8")
@@ -40,15 +45,21 @@ class FakeRedis:
     def delete(self, *keys):
         deleted = 0
         for key in keys:
-            for store in (self.sets, self.lists, self.counters):
+            for store in self._stores:
                 deleted += store.pop(self._key(key), None) is not None
         return deleted
 
     def exists(self, key):
         key = self._key(key)
-        return int(
-            any(key in store for store in (self.sets, self.lists, self.counters))
-        )
+        return int(any(key in store for store in self._stores))
+
+    # --- strings (variables) ---
+    def set(self, key, value):
+        self.strings[self._key(key)] = value
+        return True
+
+    def get(self, key):
+        return self.strings.get(self._key(key))
 
     # --- counters ---
     def incr(self, key, amount=1):

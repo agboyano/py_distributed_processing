@@ -27,10 +27,12 @@ class FileSystemConnector(Connector):
 
     Queues are `fs_structs` lists and the registry (sets and counters) is a
     `fs_structs` dict, all under an `FSNamespace` rooted at `base_path`.
-    Registry operations run under a file lock (`registry_lock`); the id
-    counters under their own (`nclients_lock`, `nservers_lock`). Blocking
-    pops wait for filesystem events (watchdog) or poll, depending on
-    `with_watchdog`.
+    Shared variables (`set_variable`/`get_variable`) live in a second
+    `fs_structs` dict (`variables`), one file per variable, written
+    atomically. Registry operations run under a file lock
+    (`registry_lock`); the id counters under their own (`nclients_lock`,
+    `nservers_lock`). Blocking pops wait for filesystem events (watchdog)
+    or poll, depending on `with_watchdog`.
 
     Args:
         base_path (str): Directory shared by clients and workers.
@@ -79,6 +81,7 @@ class FileSystemConnector(Connector):
     ):
         self.namespace = fs_structs.structs.FSNamespace(base_path, temp_dir, serializer)
         self.registry = self.namespace.udict("registry")
+        self.variables_store = self.namespace.udict("variables")
         self.with_watchdog = True
 
         self.pop_sleep = (5, 10)  # only used when with_watchdog is False
@@ -97,9 +100,10 @@ class FileSystemConnector(Connector):
         self.lock_registry_max_age: float = 600
 
     def clean_namespace(self) -> None:
-        "Deletes every object linked to the namespace (queues, registry, counters)."
+        "Deletes every object linked to the namespace (queues, registry, counters, variables)."
         self.namespace.clear()
         self.registry = self.namespace.udict("registry")
+        self.variables_store = self.namespace.udict("variables")
 
     # ---- primitives ----------------------------------------------------------
 
@@ -144,6 +148,24 @@ class FileSystemConnector(Connector):
             del self.registry[key]
         except KeyError:
             pass
+
+    # ---- variables (own udict, one file per variable) ------------------------
+
+    def _value_set(self, key: str, value: Any) -> None:
+        self.variables_store[key] = value
+
+    def _value_get(self, key: str) -> Any:
+        return self.variables_store[key]
+
+    def _value_delete(self, key: str) -> bool:
+        try:
+            del self.variables_store[key]
+        except KeyError:
+            return False
+        return True
+
+    def _value_keys(self, prefix: str) -> list[str]:
+        return [k for k in self.variables_store.keys() if k.startswith(prefix)]
 
     # ---- queues --------------------------------------------------------------
 

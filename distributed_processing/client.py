@@ -146,6 +146,43 @@ class Client:
         "Sets the default requests queue from its simple name."
         self.default_queue_ref = self.connector.get_requests_queue(queue)
 
+    # ---- shared variables (delegated to the connector) -----------------------
+
+    def set_variable(self, name: str, value: Any) -> None:
+        """Stores a variable shared by every client and worker of the namespace.
+
+        Same as `connector.set_variable`. The value goes through the
+        connector's serializer (JSON on Redis by default) and the last write
+        wins. Typical use: publish a parameter once instead of sending it
+        with every request.
+
+        Args:
+            name (str): Variable name.
+            value: Python object to share.
+
+        Example:
+            client.set_variable("valuation_date", "2026-09-18")
+            client.rpc_sync("price", [isin])  # the worker reads the date
+
+        """
+        self.connector.set_variable(name, value)
+
+    def get_variable(self, name: str, default: Any = None) -> Any:
+        """Returns a copy of a shared variable, or `default` if it is not set.
+
+        Same as `connector.get_variable`. Mutating the returned object does
+        not change the shared value.
+        """
+        return self.connector.get_variable(name, default)
+
+    def delete_variable(self, name: str) -> bool:
+        "Deletes a shared variable. Returns True if it existed."
+        return self.connector.delete_variable(name)
+
+    def variables(self) -> list:
+        "Returns the sorted names of the shared variables."
+        return self.connector.variables()
+
     def to_requests_queue_ref(self, queue_name: str) -> str:
         "Returns the connector queue reference for a simple queue name."
         return self.connector.get_requests_queue(queue_name)

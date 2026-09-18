@@ -38,6 +38,15 @@ class TestBasics:
         client._update_responses_cache([{"result": 2}])
         assert [n["result"] for n in client.notifications] == [1, 2]
 
+    def test_shared_variables_go_through_the_connector(self, connector, client):
+        client.set_variable("v", {"a": 1})
+        assert connector.get_variable("v") == {"a": 1}
+        assert client.get_variable("v") == {"a": 1}
+        assert client.get_variable("missing", default=0) == 0
+        assert client.variables() == ["v"]
+        assert client.delete_variable("v") is True
+        assert client.variables() == []
+
 
 class TestRpc:
     def test_rpc_async_round_trip(self, connector, worker, client):

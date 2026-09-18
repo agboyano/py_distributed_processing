@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 
 class RedisConnector(Connector):
-    """Transport on Redis: lists as queues, sets as registries.
+    """Transport on Redis: lists as queues, sets as registries, strings as variables.
 
     All keys are prefixed with the namespace, so several independent
     deployments can share the same Redis database. Registry updates need
@@ -23,7 +23,8 @@ class RedisConnector(Connector):
     Messages are handed to `enqueue` as Python objects and returned by the
     `pop*` methods as Python objects: the connector encodes them with
     `serializer` before storing them in Redis and decodes them on the way
-    out. The connection is created with `decode_responses=False` (the
+    out. Shared variables (`set_variable`/`get_variable`) are encoded the
+    same way and stored as plain string keys. The connection is created with `decode_responses=False` (the
     redis-py default) so payloads reach the serializer as raw bytes; the
     connector decodes key and queue names itself. `decode_responses=True`
     would break every serializer whose output is not UTF-8 text (pickle,
@@ -88,6 +89,23 @@ class RedisConnector(Connector):
     def _set_delete(self, key: str) -> None:
         # Redis deletes empty sets by itself; this is a no-op then.
         self.connection.delete(key)
+
+    # ---- variables (plain string keys, encoded with the serializer) ----------
+
+    def _value_set(self, key: str, value: Any) -> None:
+        self.connection.set(key, self.serializer.dumps(value))
+
+    def _value_get(self, key: str) -> Any:
+        raw = self.connection.get(key)
+        if raw is None:
+            raise KeyError(key)
+        return self.serializer.loads(raw)
+
+    def _value_delete(self, key: str) -> bool:
+        return bool(self.connection.delete(key))
+
+    def _value_keys(self, prefix: str) -> list[str]:
+        return [k.decode("utf8") for k in self.connection.scan_iter(f"{prefix}*")]
 
     # ---- queues --------------------------------------------------------------
 
