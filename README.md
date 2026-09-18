@@ -109,10 +109,14 @@ connector decides how to store them:
 
 - `RedisConnector(..., serializer=None)`: `serializer` is any object with
   `dumps(obj) -> bytes` and `loads(bytes) -> obj`, `JsonSerializer()` by
-  default. The `pickle`, `dill` and `msgpack` modules work as they are
-  (`RedisConnector("localhost", serializer=pickle)`). The connection uses
-  `decode_responses=False`, so binary formats are safe; a message that cannot
-  be decoded is logged and skipped.
+  default. `distributed_processing.serializers` also provides
+  `PickleSerializer(protocol=None)` (keeps Python types) and
+  `JoblibSerializer(compress=0)` (efficient for NumPy/pandas, needs `joblib`);
+  the `pickle`, `dill` and `msgpack` modules work as they are too
+  (`RedisConnector("localhost", serializer=pickle)`). Pickle-based
+  serializers execute code from the data: trusted infrastructure only. The
+  connection uses `decode_responses=False`, so binary formats are safe; a
+  message that cannot be decoded is logged and skipped.
 - `FileSystemConnector(base_path, temp_dir=None, serializer=...)`: `serializer`
   is an `fs_structs` serializer (`joblib_serializer` by default, also
   `pickle_serializer` and `json_serializer`), the same one used for the
@@ -178,7 +182,7 @@ distributed_processing/
 ├── worker.py                # Worker: queues, dispatch and method execution
 ├── async_result.py          # AsyncResult and gather()
 ├── messages.py              # message construction and validation
-├── serializers.py           # JsonSerializer (RedisConnector default)
+├── serializers.py           # JsonSerializer (Redis default), PickleSerializer, JoblibSerializer
 ├── redis_connector.py       # Redis transport
 ├── filesystem_connector.py  # filesystem transport (fs_structs)
 ├── exceptions.py            # RemoteException

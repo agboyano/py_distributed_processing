@@ -3,7 +3,7 @@ import logging
 from .async_result import AsyncResult, gather
 from .client import Client
 from .exceptions import RemoteException
-from .serializers import JsonSerializer
+from .serializers import JoblibSerializer, JsonSerializer, PickleSerializer
 from .worker import Worker
 
 # Connectors are not imported here: they depend on optional extras
@@ -20,7 +20,9 @@ logging.getLogger(__name__).addHandler(logging.NullHandler())
 __all__ = [
     "AsyncResult",
     "Client",
+    "JoblibSerializer",
     "JsonSerializer",
+    "PickleSerializer",
     "RemoteException",
     "Worker",
     "gather",

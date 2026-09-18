@@ -34,7 +34,8 @@ class RedisConnector:
         namespace (str): Prefix for every key used by the connector.
             Defaults to 'tasks'.
         serializer (optional): Object with `dumps(obj) -> bytes` and
-            `loads(bytes) -> obj`. Defaults to `JsonSerializer()`. Any
+            `loads(bytes) -> obj`. Defaults to `JsonSerializer()`. See also
+            `PickleSerializer` and `JoblibSerializer` in `serializers`; any
             module with that pair works as is (`pickle`, `dill`, `msgpack`).
             A message that `loads` cannot decode is logged and skipped.
 
