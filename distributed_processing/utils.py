@@ -33,7 +33,7 @@ def fsclient(
     Args:
         NS_PATH (str): Directory shared by clients and workers.
         check_registry (str): Queue selection mode ('cache', 'always' or
-            other, see `Client`). Defaults to 'cache'.
+            'never', see `Client`). Defaults to 'cache'.
         with_watchdog (bool): If True, blocking pops wait for filesystem
             events; if False, they poll. Defaults to True.
         pop_watchdog_timeout (float): Seconds to wait for a file event

@@ -181,6 +181,47 @@ class TestBatch:
         assert [f.get(timeout=1) for f in fs] == [3, 12]
 
 
+class TestCheckRegistry:
+    def test_value_is_normalized(self, connector, worker):
+        client = Client(connector, check_registry="Never")
+        assert client.check_registry == "never"
+        client.check_registry = " CACHE "
+        assert client.check_registry == "cache"
+
+    @pytest.mark.parametrize("bad", ["chache", True, None])
+    def test_unknown_value_raises(self, connector, worker, bad):
+        with pytest.raises(ValueError, match="cache"):
+            Client(connector, check_registry=bad)
+        client = Client(connector)
+        with pytest.raises(ValueError, match="never"):
+            client.check_registry = bad
+        assert client.check_registry == "cache"  # unchanged
+
+    def test_switching_to_cache_fills_the_cache(self, connector, worker):
+        client = Client(connector, check_registry="never")
+        assert client.registry() == {"methods": {}, "workers": {}}
+
+        client.check_registry = "cache"
+
+        assert "add" in client.registry()["methods"]
+        f = client.rpc_async("add", [1, 2])  # no KeyError, queue found
+        worker.run_once(timeout=0.1)
+        assert f.get(timeout=1) == 3
+
+    def test_unknown_method_has_no_workers(self, client):
+        assert client.all_workers_for_method("nope") == []
+
+    def test_stale_cache_is_refreshed_once_for_batches(self, connector):
+        client = Client(connector, check_registry="cache")  # empty registry
+        w = Worker(connector)
+        w.add_requests_queue("late", {"add": add})
+        w.update_methods_registry()
+
+        fs = client.rpc_batch_async([("add", [1, 2], None)])
+        w.run_once(timeout=0.1)
+        assert fs[0].get(timeout=1) == 3
+
+
 class TestRegistryQueries:
     def test_all_workers_for_method_multiple_queues(self, connector):
         w1 = Worker(connector)

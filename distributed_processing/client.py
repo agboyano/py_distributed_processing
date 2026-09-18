@@ -15,6 +15,9 @@ from .messages import is_ack, is_batch_response, is_single_response, single_requ
 
 logger = logging.getLogger(__name__)
 
+# Valid values of `Client.check_registry` (see the property).
+CHECK_REGISTRY_MODES = ("cache", "always", "never")
+
 
 def timestamp() -> str:
     return datetime.now().isoformat()
@@ -84,8 +87,12 @@ class Client:
               queue serves the method.
             - 'always': check the connector registry on every request.
               Huge overhead. ValueError if no queue serves the method.
-            - 'never' (or any other value): send to `default_queue`
-              without consulting the registry.
+            - 'never': send to `default_queue` without consulting the
+              registry.
+            Case-insensitive, leading/trailing spaces ignored; any other
+            value raises ValueError, at construction or on assignment.
+            Setting 'cache' on a client created in another mode fills the
+            registry cache.
         use_reply_to (bool): If True, requests include the client's
             responses queue in the `reply_to` key. Defaults to False
             (workers derive the responses queue from the request `id`).
@@ -124,11 +131,10 @@ class Client:
         # Used responses (wait_one_response).
         self.responses_used: set = set()
 
+        # Always has both keys, so lookups never raise KeyError. Must exist
+        # before check_registry is set: the setter fills it for 'cache'.
+        self._registry: dict = {"methods": {}, "workers": {}}
         self.check_registry = check_registry
-        self._registry: dict = {}
-
-        if check_registry == "cache":
-            self.update_registry_cache()
 
         self.client_id = (
             client_id if client_id is not None else self.connector.get_client_id()
@@ -147,6 +153,43 @@ class Client:
         self.set_default_queue(default_queue)
 
         self.timeout = timeout
+
+    @property
+    def check_registry(self) -> str:
+        """Queue selection mode for requests sent without an explicit `queue`.
+
+        One of `CHECK_REGISTRY_MODES`: 'cache', 'always' or 'never' (see the
+        class docstring for what each one does). Assignment normalizes the
+        value (case-insensitive, surrounding spaces ignored) and raises
+        `ValueError` for anything else. Assigning 'cache' fills the registry
+        cache if it is empty, so a client created in another mode can switch
+        to 'cache' at runtime without calling `update_registry_cache`.
+
+        Raises:
+            ValueError: If the value is not one of the three modes.
+
+        """
+        return self._check_registry
+
+    # Implementation notes.
+    #
+    # The mode used to be a plain attribute compared literally against
+    # "cache" and "always": anything else, including a typo ("chache") or
+    # another case ("Never", as in the filesystem example notebooks), was
+    # silently treated as "never". Normalizing keeps the notebooks working;
+    # raising on unknown values makes the typo visible at once. Filling the
+    # cache on "cache" removes a KeyError that hit a client created with
+    # "never" and switched to "cache" later, whose cache had never been read.
+    @check_registry.setter
+    def check_registry(self, value: str) -> None:
+        mode = value.strip().lower() if isinstance(value, str) else None
+        if mode not in CHECK_REGISTRY_MODES:
+            raise ValueError(
+                f"check_registry must be one of {CHECK_REGISTRY_MODES}, got {value!r}."
+            )
+        self._check_registry = mode
+        if mode == "cache" and not self._registry["methods"]:
+            self.update_registry_cache()
 
     def set_default_queue(self, queue: str) -> None:
         "Sets the default requests queue (used only with `check_registry='never'` and no explicit `queue`)."
@@ -231,33 +274,28 @@ class Client:
                 "workers": {queue_name: [worker_id, ...]}}.
 
         """
-        registry = {}
         if update:
             self.update_registry_cache()
 
-        if "methods" in self._registry:
-            registry["methods"] = {}
-            for method in self._registry["methods"]:
-                registry["methods"][method] = [
-                    self.simple_queue_name(x) for x in self._registry["methods"][method]
-                ]
-
-        if "workers" in self._registry:
-            registry["workers"] = {}
-            for queue_ref in self._registry["workers"]:
-                registry["workers"][self.simple_queue_name(queue_ref)] = self._registry[
-                    "workers"
-                ][queue_ref]
-
-        return registry
+        return {
+            "methods": {
+                method: [self.simple_queue_name(x) for x in queue_refs]
+                for method, queue_refs in self._registry["methods"].items()
+            },
+            "workers": {
+                self.simple_queue_name(queue_ref): workers
+                for queue_ref, workers in self._registry["workers"].items()
+            },
+        }
 
     def _all_queue_refs_for_method(self, method: str) -> list:
         if self.check_registry == "always":
             return self.connector.all_queues_for_method(method)
         elif self.check_registry == "cache":
             if method not in self._registry["methods"]:
-                return []
-            return self._registry["methods"][method]
+                # Stale cache? Refresh once, as _select_queue_ref does.
+                self.update_registry_cache()
+            return self._registry["methods"].get(method, [])
         else:
             return [self.default_queue_ref]
 
@@ -293,7 +331,7 @@ class Client:
         if update or self.check_registry == "always":
             self.update_registry_cache()
         r = self._registry
-        queues = r["methods"][method]
+        queues = r["methods"].get(method, [])
         ws = set()
         for q in queues:
             ws = ws.union(set(r["workers"].get(q, [])))
