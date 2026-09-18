@@ -245,7 +245,8 @@ class TestLifecycle:
             queue_ref = connector.get_requests_queue("q")
             assert w.worker_id in connector.workers_registry()[queue_ref]
 
-        assert w.worker_id not in connector.workers_registry()[queue_ref]
+        # The queue had a single worker, so unregistering drops it entirely.
+        assert queue_ref not in connector.workers_registry()
 
     def test_close_is_idempotent(self, connector):
         unregister_calls = []

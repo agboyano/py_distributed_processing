@@ -126,21 +126,61 @@ Every client and worker on a namespace must use the same serializer.
 
 ### Connector contract
 
-A connector is any object with these methods (duck typing, no base class);
-`tests/conftest.py:MemoryConnector` is the smallest complete example.
+A connector is a subclass of `distributed_processing.Connector`. The base
+class implements the naming scheme and the method registry once; a transport
+only provides a few primitives. The full rules live in the docstring of
+`Connector` and are checked against every implementation by
+`tests/test_connector.py`. In short, a namespace holds:
 
-- Names: `get_requests_queue(name) -> ref`, `requests_queue_name(ref) -> name`,
-  `get_responses_queue(client_id) -> ref`, `get_reply_to_from_id(request_id) -> ref`,
-  `get_client_id()`, `get_server_id()`.
-- Registry: `register_methods({queue_ref: {method: fn}}, worker_id)`,
-  `unregister_methods(worker_id)`, `methods_registry() -> {method: [queue_ref]}`,
-  `workers_registry() -> {queue_ref: [worker_id]}`, `all_queues_for_method(method)`,
-  `random_queue_for_method(method)`.
-- Queues, carrying Python objects: `enqueue(queue_ref, obj)`,
-  `pop(queue_ref, timeout) -> (queue_ref, obj) | None`,
-  `pop_multiple([queue_ref, ...], timeout) -> (queue_ref, obj) | None` (queues in
-  priority order), `pop_all(queue_ref) -> [obj, ...]`. `timeout <= 0` waits
-  indefinitely in `pop`/`pop_multiple`.
+- **FIFO queues** of Python objects. `enqueue(queue_ref, obj)` appends.
+  `pop(queue_ref, timeout)` and `pop_multiple([queue_ref, ...], timeout)`
+  return `(queue_ref, obj)` or `None` on timeout; `timeout < 0` waits
+  indefinitely, `0` checks once, `> 0` waits at most that long.
+  `pop_multiple` checks the queues in the given order (priority) and returns
+  the first message found. `pop_all(queue_ref)` never blocks and returns
+  `[obj, ...]` in FIFO order. Undecodable messages are logged and skipped.
+  A responses queue has one consumer; a requests queue may have many, and
+  each message reaches exactly one of them.
+- **A registry** of sets: which queues serve each method, which workers listen
+  on each queue. `register_methods({queue_ref: {method: fn}}, worker_id)` is
+  additive and idempotent. `unregister_methods(worker_id)` removes the worker
+  from every queue; a queue left without workers is dropped and removed from
+  every method, and a method left without queues is dropped. It is
+  coarse-grained: a method stays available while any queue serving it still
+  has a worker. `methods_registry() -> {method: [queue_ref]}`,
+  `workers_registry() -> {queue_ref: [worker_id]}`,
+  `all_queues_for_method(method)` and `random_queue_for_method(method)`
+  (`None` if no queue serves it) read it.
+- **Two counters** for unique ids. `get_client_id()` / `get_server_id()`
+  return `{id_prefix}_client{sep}{n}` / `{id_prefix}_server{sep}{n}`; ids are
+  never reused until `clean_namespace()`, which deletes queues, registry and
+  counters.
+- **Names.** `get_requests_queue(name)` / `requests_queue_name(ref)` round
+  trip; `get_responses_queue(client_id)`; `get_reply_to_from_id("{client_id}:{n}")`
+  is the responses queue of that client.
+
+Every public registry operation runs inside `_registry_lock()`; the
+filesystem connector uses a file lock there, Redis needs none because its
+commands are atomic. Queue operations are not locked: the transport itself
+must hand each message to exactly one consumer.
+
+### How to write a connector
+
+Subclass `Connector`, set `sep` and `id_prefix`, and implement:
+
+- `clean_namespace()`.
+- `_incr(key) -> int`: atomic counter, first call returns 1.
+- The set store: `_set_add(key, members)`, `_set_discard(key, members) -> int`
+  (how many were present), `_set_members(key) -> set`, `_set_keys(prefix) -> list`,
+  `_set_delete(key)`.
+- The queues: `enqueue`, `pop`, `pop_multiple`, `pop_all`, with the semantics above.
+
+Override `_key(*parts)` if keys need a namespace prefix (Redis does) and
+`_registry_lock()` if the set store is not atomic on its own (the filesystem
+does). Instantiating a subclass that misses a primitive raises `TypeError`.
+`tests/conftest.py:MemoryConnector` is the smallest complete example (about
+60 lines); add the new connector to the `connector` fixture of
+`tests/test_connector.py` and the contract suite becomes its acceptance test.
 
 ## Security note
 
@@ -171,8 +211,9 @@ ruff format distributed_processing tests  # formatting
 ```
 
 Unit tests use an in-memory connector (`tests/conftest.py`), with no need
-for Redis or a shared directory. CI (GitHub Actions) runs lint + tests on
-Python 3.9–3.13.
+for Redis or a shared directory. `tests/test_connector.py` runs the connector
+contract against the memory, filesystem and Redis (fake server) connectors.
+CI (GitHub Actions) runs lint + tests on Python 3.9–3.13.
 
 ## Layout
 
@@ -183,6 +224,7 @@ distributed_processing/
 ├── async_result.py          # AsyncResult and gather()
 ├── messages.py              # message construction and validation
 ├── serializers.py           # JsonSerializer (Redis default), PickleSerializer, JoblibSerializer
+├── connector.py             # Connector base class: contract, naming and registry
 ├── redis_connector.py       # Redis transport
 ├── filesystem_connector.py  # filesystem transport (fs_structs)
 ├── exceptions.py            # RemoteException

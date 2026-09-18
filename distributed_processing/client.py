@@ -10,6 +10,7 @@ from typing import Any, Callable
 import dill
 
 from .async_result import AsyncResult
+from .connector import Connector
 from .messages import is_ack, is_batch_response, is_single_response, single_request
 
 logger = logging.getLogger(__name__)
@@ -50,7 +51,7 @@ class Client:
     `wait_one_response` (usually through the `get` method of an `AsyncResult`).
 
     Args:
-        connector: Transport instance (e.g. `RedisConnector`,
+        connector (Connector): Transport instance (e.g. `RedisConnector`,
             `FileSystemConnector`). Messages are handed to the connector as
             Python objects; the connector owns the wire encoding.
         client_id (str, optional): Client identifier. Defaults to None.
@@ -75,7 +76,7 @@ class Client:
 
     def __init__(
         self,
-        connector,
+        connector: Connector,
         client_id: str | None = None,
         check_registry: str = "cache",
         use_reply_to: bool = False,

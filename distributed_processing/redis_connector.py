@@ -1,22 +1,24 @@
 from __future__ import annotations
 
 import logging
-import random
 import time
+from collections.abc import Iterable
 from typing import Any
 
 import redis
 
+from .connector import Connector
 from .serializers import JsonSerializer
 
 logger = logging.getLogger(__name__)
 
 
-class RedisConnector:
+class RedisConnector(Connector):
     """Transport on Redis: lists as queues, sets as registries.
 
     All keys are prefixed with the namespace, so several independent
-    deployments can share the same Redis database.
+    deployments can share the same Redis database. Registry updates need
+    no lock: every Redis command is atomic.
 
     Messages are handed to `enqueue` as Python objects and returned by the
     `pop*` methods as Python objects: the connector encodes them with
@@ -41,6 +43,9 @@ class RedisConnector:
 
     """
 
+    sep = ":"
+    id_prefix = "redis"
+
     def __init__(
         self,
         redis_host: str = "localhost",
@@ -56,135 +61,35 @@ class RedisConnector:
         self.serializer = JsonSerializer() if serializer is None else serializer
 
     def clean_namespace(self) -> None:
-        "Deletes every object linked to the namespace."
+        "Deletes every key of the namespace (queues, registry and counters)."
         for item in self.connection.scan_iter(f"{self.namespace}:*"):
             self.connection.delete(item)
 
-    def get_requests_queue(self, queue_name: str) -> str:
-        "Returns the requests queue reference for a simple queue name."
-        return f"{self.namespace}:requests:{queue_name}"
+    # ---- primitives ----------------------------------------------------------
 
-    def requests_queue_name(self, queue_ref: str) -> str:
-        "Returns the simple queue name for a requests queue reference."
-        return queue_ref.split(":")[-1]
+    def _key(self, *parts: str) -> str:
+        return ":".join((self.namespace, *parts))
 
-    def get_client_id(self) -> str:
-        "Generates a new unique client id (atomic counter in Redis)."
-        nclients = str(self.connection.incr(f"{self.namespace}:nclients", 1))
-        return f"{self.namespace}:redis_client:{nclients}"
+    def _incr(self, key: str) -> int:
+        return int(self.connection.incr(key, 1))
 
-    def get_server_id(self) -> str:
-        "Generates a new unique worker id (atomic counter in Redis)."
-        nservers = str(self.connection.incr(f"{self.namespace}:nservers", 1))
-        return f"{self.namespace}:redis_server:{nservers}"
+    def _set_add(self, key: str, members: Iterable[str]) -> None:
+        self.connection.sadd(key, *members)
 
-    def get_responses_queue(self, client_id: str) -> str:
-        "Returns the responses queue reference for a client id."
-        return f"{client_id}:responses"
+    def _set_discard(self, key: str, members: Iterable[str]) -> int:
+        return int(self.connection.srem(key, *members))
 
-    def get_reply_to_from_id(self, id_str: str) -> str:
-        "Derives the responses queue from a request id ({client_id}:{n})."
-        return ":".join(id_str.split(":")[:-1]) + ":responses"
+    def _set_members(self, key: str) -> set[str]:
+        return {m.decode("utf8") for m in self.connection.smembers(key)}
 
-    def methods_registry(self) -> dict:
-        """Returns {method: [queue_ref, ...]}. Used by clients.
+    def _set_keys(self, prefix: str) -> list[str]:
+        return [k.decode("utf8") for k in self.connection.scan_iter(f"{prefix}*")]
 
-        Each method has a redis set with key {namespace}:method_queues:{method}
-        whose members are the queues where requests for that method can be sent.
-        """
-        registry = {}
-        for method_set in self.connection.scan_iter(
-            f"{self.namespace}:method_queues:*"
-        ):
-            method = method_set.decode("utf8").split(":")[-1]
-            available = [x.decode("utf8") for x in self.connection.smembers(method_set)]
-            registry[method] = available
+    def _set_delete(self, key: str) -> None:
+        # Redis deletes empty sets by itself; this is a no-op then.
+        self.connection.delete(key)
 
-        return registry
-
-    def workers_registry(self) -> dict:
-        """Returns {queue_ref: [worker_id, ...]}. Used by clients.
-
-        Each queue has a redis set with key {namespace}:workers_queue:{queue}
-        whose members are the workers listening on that queue.
-        """
-        registry = {}
-        for method_set in self.connection.scan_iter(
-            f"{self.namespace}:workers_queue:*"
-        ):
-            method = method_set.decode("utf8").split(":")[-1]
-            available = [x.decode("utf8") for x in self.connection.smembers(method_set)]
-            registry[method] = available
-
-        return registry
-
-    def register_methods(self, requests_queues_dict: dict, worker_id: str) -> None:
-        """Used by workers to publish their methods and queues.
-
-        requests_queues_dict maps queue names to dicts with method names
-        as keys and functions as values: {queue: {method_name: fn, ...}, ...}.
-        """
-        registry: dict = {}
-        for queue_name, func_dict in requests_queues_dict.items():
-            for method in func_dict:
-                if method in registry:
-                    registry[method] += [queue_name]
-                else:
-                    registry[method] = [queue_name]
-
-        for method in registry:
-            method_set = f"{self.namespace}:method_queues:{method}"
-            self.connection.sadd(method_set, *registry[method])
-            queues = ", ".join(str(q) for q in registry[method])
-            logger.info(f"Method {method} published as available for queues: {queues}")
-
-        for queue_name in requests_queues_dict:
-            queue_set = f"{self.namespace}:workers_queue:{queue_name}"
-            self.connection.sadd(queue_set, worker_id)
-
-    def unregister_methods(self, worker_id: str) -> None:
-        """Removes a worker from the registry.
-
-        Queues without remaining workers, and methods without remaining
-        queues, are deleted from the registry (redis deletes empty sets
-        automatically).
-        """
-        empty_queues = []
-        for queue_set in self.connection.scan_iter(f"{self.namespace}:workers_queue:*"):
-            removed = self.connection.srem(queue_set, worker_id)
-            if removed and not self.connection.exists(queue_set):
-                queue_ref = queue_set.decode("utf8").removeprefix(
-                    f"{self.namespace}:workers_queue:"
-                )
-                empty_queues.append(queue_ref)
-                logger.info(
-                    f"Queue {queue_ref} has no remaining public workers listening. {worker_id} unregistered."
-                )
-
-        if len(empty_queues) == 0:
-            return
-
-        for method_set in self.connection.scan_iter(
-            f"{self.namespace}:method_queues:*"
-        ):
-            removed = self.connection.srem(method_set, *empty_queues)
-            if removed and not self.connection.exists(method_set):
-                method = method_set.decode("utf8").split(":")[-1]
-                logger.info(
-                    f"Method {method} has no remaining public queues listening. Unregistered."
-                )
-
-    def random_queue_for_method(self, method: str) -> str | None:
-        "Returns a random queue ref serving `method`, or None if there is none."
-        available = self.all_queues_for_method(method)
-        if len(available) == 0:
-            return None
-        return random.choice(available)
-
-    def all_queues_for_method(self, method: str) -> list:
-        "Returns all the queue refs where requests for `method` can be sent."
-        method_set = f"{self.namespace}:method_queues:{method}"
-        return [x.decode("utf8") for x in self.connection.smembers(method_set)]
+    # ---- queues --------------------------------------------------------------
 
     def _loads(self, queue: bytes | str, raw: bytes) -> tuple | None:
         "Returns (queue_name, obj), or None (after logging) if `raw` cannot be decoded."
@@ -198,12 +103,24 @@ class RedisConnector:
             return None
 
     def _blpop(self, queues: str | list, timeout: float) -> tuple | None:
-        """Blocking pop from one or more queues, skipping undecodable messages.
+        """Pop from one or more queues, skipping undecodable messages.
 
-        timeout <= 0 waits indefinitely. Returns (queue_name, obj), or None
-        on timeout. A skipped message does not extend the total wait.
+        timeout < 0 waits indefinitely, 0 checks once (LPOP), > 0 waits at
+        most that long (BLPOP). Returns (queue_name, obj), or None. A
+        skipped message does not extend the total wait.
         """
-        forever = timeout <= 0
+        queues = [queues] if isinstance(queues, str) else list(queues)
+        if timeout == 0:
+            for queue in queues:
+                raw = self.connection.lpop(queue)
+                while raw is not None:
+                    decoded = self._loads(queue, raw)
+                    if decoded is not None:
+                        return decoded
+                    raw = self.connection.lpop(queue)
+            return None
+
+        forever = timeout < 0
         deadline = None if forever else time.time() + timeout
         while True:
             # blpop timeout == 0 waits indefinitely
@@ -222,17 +139,19 @@ class RedisConnector:
         self.connection.rpush(queue, self.serializer.dumps(msg))
 
     def pop(self, queue: str, timeout: float = -1) -> tuple | None:
-        """Blocking pop. timeout <= 0 waits indefinitely. Used by clients.
+        """Blocking pop. Used by clients.
 
-        Returns (queue_name, obj), or None on timeout.
+        timeout < 0 waits indefinitely, 0 checks once, > 0 waits at most
+        that many seconds. Returns (queue_name, obj), or None on timeout.
         """
         return self._blpop(queue, timeout)
 
     def pop_multiple(self, queues: list, timeout: float = -1) -> tuple | None:
         """Blocking pop from multiple queues, ordered by priority (highest first).
 
-        timeout: maximum wait time in seconds (<= 0 = wait indefinitely).
-        Returns (queue_name, obj), or None on timeout. Used by workers.
+        timeout < 0 waits indefinitely, 0 checks once, > 0 waits at most
+        that many seconds. Returns (queue_name, obj), or None on timeout.
+        Used by workers.
         """
         return self._blpop(queues, timeout)
 

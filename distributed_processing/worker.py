@@ -10,6 +10,7 @@ from typing import Any, Callable
 
 import dill
 
+from .connector import Connector
 from .messages import (
     ack,
     error_response,
@@ -61,7 +62,7 @@ class Worker:
     public queues and methods on shutdown.
 
     Args:
-        connector: Transport instance (e.g. `RedisConnector`,
+        connector (Connector): Transport instance (e.g. `RedisConnector`,
             `FileSystemConnector`). Messages are handed to the connector as
             Python objects; the connector owns the wire encoding.
         worker_id (str, optional): Worker identifier. Defaults to None.
@@ -77,7 +78,7 @@ class Worker:
 
     def __init__(
         self,
-        connector,
+        connector: Connector,
         worker_id: str | None = None,
         with_trace: bool = True,
         reply_to_default: str | None = None,

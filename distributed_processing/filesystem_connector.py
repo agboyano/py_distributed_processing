@@ -3,9 +3,12 @@ from __future__ import annotations
 import logging
 import random
 import time
+from collections.abc import Callable, Iterable
 from typing import Any
 
 import fs_structs
+
+from .connector import Connector
 
 
 def sleep(a: float, b: float | None = None) -> None:
@@ -19,12 +22,15 @@ def sleep(a: float, b: float | None = None) -> None:
 logger = logging.getLogger(__name__)
 
 
-class FileSystemConnector:
+class FileSystemConnector(Connector):
     """Transport on a shared directory (NFS, local disk, ...) via `fs_structs`.
 
-    Queues are `fs_structs` lists and the registry is a `fs_structs` dict,
-    all under an `FSNamespace` rooted at `base_path`. Blocking pops wait for
-    filesystem events (watchdog) or poll, depending on `with_watchdog`.
+    Queues are `fs_structs` lists and the registry (sets and counters) is a
+    `fs_structs` dict, all under an `FSNamespace` rooted at `base_path`.
+    Registry operations run under a file lock (`registry_lock`); the id
+    counters under their own (`nclients_lock`, `nservers_lock`). Blocking
+    pops wait for filesystem events (watchdog) or poll, depending on
+    `with_watchdog`.
 
     Args:
         base_path (str): Directory shared by clients and workers.
@@ -62,6 +68,9 @@ class FileSystemConnector:
 
     """
 
+    sep = "_"
+    id_prefix = "fs"
+
     def __init__(
         self,
         base_path: str,
@@ -88,267 +97,135 @@ class FileSystemConnector:
         self.lock_registry_max_age: float = 600
 
     def clean_namespace(self) -> None:
-        "Deletes every object linked to the namespace."
+        "Deletes every object linked to the namespace (queues, registry, counters)."
         self.namespace.clear()
         self.registry = self.namespace.udict("registry")
 
-    def get_requests_queue(self, queue_name: str) -> str:
-        "Returns the requests queue reference for a simple queue name."
-        return f"requests_{queue_name}"
+    # ---- primitives ----------------------------------------------------------
 
-    def requests_queue_name(self, queue_ref: str) -> str:
-        "Returns the simple queue name for a requests queue reference."
-        return queue_ref.removeprefix("requests_")
-
-    def get_responses_queue(self, client_id: str) -> str:
-        "Returns the responses queue reference for a client id."
-        return f"{client_id}_responses"
-
-    def get_reply_to_from_id(self, id_str: str) -> str:
-        "Derives the responses queue from a request id ({client_id}:{n})."
-        return id_str.split(":")[0] + "_responses"
-
-    def get_client_id(self) -> str:
-        "Generates a new unique client id (locked counter in the registry)."
-        with fs_structs.structs.lock_context(
+    def _lock(self, name: str):
+        return fs_structs.structs.lock_context(
             self.registry.base_path,
-            "nclients_lock",
+            name,
             self.lock_registry_timeout,
             self.lock_registry_watchdog_timeout,
             self.lock_registry_wait,
             max_age=self.lock_registry_max_age,
-        ):
-            nclients = self.registry.get("nclients", 0) + 1
-            self.registry["nclients"] = nclients
-        return f"fs_client_{nclients}"
+        )
 
-    def get_server_id(self) -> str:
-        "Generates a new unique worker id (locked counter in the registry)."
-        with fs_structs.structs.lock_context(
-            self.registry.base_path,
-            "nservers_lock",
-            self.lock_registry_timeout,
-            self.lock_registry_watchdog_timeout,
-            self.lock_registry_wait,
-            max_age=self.lock_registry_max_age,
-        ):
-            nservers = self.registry.get("nservers", 0) + 1
-            self.registry["nservers"] = nservers
-        return f"fs_server_{nservers}"
+    def _registry_lock(self):
+        return self._lock("registry_lock")
 
-    def methods_registry(self) -> dict:
-        """Returns {method: [queue_ref, ...]}. Used by clients."""
-        registry = {}
+    def _incr(self, key: str) -> int:
+        with self._lock(f"{key}_lock"):
+            n = self.registry.get(key, 0) + 1
+            self.registry[key] = n
+        return n
 
-        with fs_structs.structs.lock_context(
-            self.registry.base_path,
-            "registry_lock",
-            self.lock_registry_timeout,
-            self.lock_registry_watchdog_timeout,
-            self.lock_registry_wait,
-            max_age=self.lock_registry_max_age,
-        ):
-            method_queues = [x for x in self.registry.keys() if "method_queues_" in x]
+    def _set_add(self, key: str, members: Iterable[str]) -> None:
+        self.registry[key] = self.registry.get(key, set()).union(members)
 
-            for method_set in method_queues:
-                method = method_set.replace("method_queues_", "")
-                available = [x for x in self.registry[method_set]]
-                registry[method] = available
+    def _set_discard(self, key: str, members: Iterable[str]) -> int:
+        current = self.registry.get(key, set())
+        remaining = current.difference(members)
+        removed = len(current) - len(remaining)
+        if removed:
+            self.registry[key] = remaining
+        return removed
 
-        return registry
+    def _set_members(self, key: str) -> set[str]:
+        return set(self.registry.get(key, set()))
 
-    def workers_registry(self) -> dict:
-        """Returns {queue_ref: [worker_id, ...]}. Used by clients."""
-        registry = {}
+    def _set_keys(self, prefix: str) -> list[str]:
+        return [k for k in self.registry.keys() if k.startswith(prefix)]
 
-        with fs_structs.structs.lock_context(
-            self.registry.base_path,
-            "registry_lock",
-            self.lock_registry_timeout,
-            self.lock_registry_watchdog_timeout,
-            self.lock_registry_wait,
-            max_age=self.lock_registry_max_age,
-        ):
-            workers_queues = [x for x in self.registry.keys() if "workers_queue_" in x]
+    def _set_delete(self, key: str) -> None:
+        try:
+            del self.registry[key]
+        except KeyError:
+            pass
 
-            for worker_queues in workers_queues:
-                worker = worker_queues.replace("workers_queue_", "")
-                available = [x for x in self.registry[worker_queues]]
-                registry[worker] = available
-
-        return registry
-
-    def register_methods(self, requests_queues_dict: dict, worker_id: str) -> None:
-        """Registers worker's public functions and their associated FIFO queues.
-
-        Args:
-            requests_queues_dict: A dictionary mapping queue names to method
-                                  dictionaries, where each method dictionary has
-                                  function names as keys and callable functions as values.
-
-                                  {'queue_name': {'function_name': callable_function, ...}, ... }
-            worker_id: Id of the worker publishing the methods.
-
-        Client Configuration Options:
-            - check_registry='cache' (default): Clients cache the registry and can
-              refresh it with update_registry_cache().
-            - check_registry='always': Client always checks the latest registry
-              before dispatching. Huge overhead.
-            - Any other value: Clients ignore the registry and send requests to
-              their default queue (see set_default_queue()).
-        """
-        registry = {}
-        for queue_name, func_dict in requests_queues_dict.items():
-            for method in func_dict:
-                registry[method] = registry.get(method, []) + [queue_name]
-
-        with fs_structs.structs.lock_context(
-            self.registry.base_path,
-            "registry_lock",
-            self.lock_registry_timeout,
-            self.lock_registry_watchdog_timeout,
-            self.lock_registry_wait,
-            max_age=self.lock_registry_max_age,
-        ):
-            for method in registry:
-                method_set = f"method_queues_{method}"
-                tmp = self.registry.get(method_set, set())
-                self.registry[method_set] = tmp.union(registry[method])
-                queues = ", ".join(str(q) for q in registry[method])
-                logger.info(
-                    f"Method {method} published as available for queues: {queues}"
-                )
-
-            for queue_name in requests_queues_dict:
-                queue_set = f"workers_queue_{queue_name}"
-                tmp = self.registry.get(queue_set, set())
-                self.registry[queue_set] = tmp.union({worker_id})
-
-    def _unregister_member_from_sets(
-        self, prefix, member, settype="Method", listeners="queues"
-    ):
-        deleted_variables = []
-        for s in [x for x in self.registry.keys() if prefix in x]:
-            tmp = self.registry[s]
-            tmp.discard(member)
-            name = s.removeprefix(prefix)
-            if len(tmp) == 0:
-                del self.registry[s]
-                logger.info(
-                    f"{settype} {name} has not remaining public {listeners} listening. {member} unregistered."
-                )
-                deleted_variables.append(name)
-            else:
-                self.registry[s] = tmp
-        return deleted_variables
-
-    def unregister_methods(self, worker_id: str) -> None:
-        """Removes a worker from the registry.
-
-        Queues without remaining workers, and methods without remaining
-        queues, are deleted from the registry.
-        """
-        with fs_structs.structs.lock_context(
-            self.registry.base_path,
-            "registry_lock",
-            self.lock_registry_timeout,
-            self.lock_registry_watchdog_timeout,
-            self.lock_registry_wait,
-            max_age=self.lock_registry_max_age,
-        ):
-            for queue_name in self._unregister_member_from_sets(
-                "workers_queue_", worker_id, "Queue", "workers"
-            ):
-                _ = self._unregister_member_from_sets(
-                    "method_queues_", queue_name, "Method", "queues"
-                )
-
-    def random_queue_for_method(self, method: str) -> str | None:
-        "Returns a random queue ref serving `method`, or None if there is none."
-        available = self.all_queues_for_method(method)
-        if len(available) == 0:
-            return None
-        return random.choice(available)
-
-    def all_queues_for_method(self, method: str) -> list:
-        "Returns all the queue refs where requests for `method` can be sent."
-        method_set = f"method_queues_{method}"
-        return list(self.registry.get(method_set, []))
+    # ---- queues --------------------------------------------------------------
 
     def enqueue(self, queue_name: str, msg: Any) -> None:
         "Appends a message to the queue (stored with the `fs_structs` serializer)."
         queue = self.namespace.list(queue_name)
         queue.append(msg)
 
-    def pop(self, queue_name: str, timeout: float = -1) -> tuple | None:
-        """Blocking pop operation for retrieving first item from a FIFO queue.
+    def _pop_loop(
+        self, try_pop: Callable[[], Any], watch_paths: list, timeout: float
+    ) -> tuple | None:
+        """Calls `try_pop` until it returns a message or `timeout` expires.
 
-        Args:
-            queue_name: Name of the queue to pop first item from
-            timeout: Maximum time to wait in seconds (< 0 = waits indefinitely, 0 = try once)
-
-
-        Returns:
-            tuple: (queue_name, value) if first item found, None if timeout occurs
-
-        Note:
-            - Used by clients
-            - Supports both watchdog and polling modes
+        Between attempts it waits for a file-creation event in `watch_paths`
+        (watchdog mode) or sleeps (polling mode). `timeout < 0` waits
+        indefinitely, `0` tries once.
         """
-
-        def try_pop(queue_name, queue):
-            try:
-                # using pop(0) instead of pop_left. Expected only one client per results queue.
-                return (queue_name, queue.pop(0))
-            except (IndexError, KeyError):
-                return False
-
-        queue = self.namespace.list(queue_name)
-
-        if ok := try_pop(queue_name, queue):
+        if ok := try_pop():
             return ok
 
         start_time = time.time()
         time_left = timeout
-        wait_forever = True if timeout < -0.001 else False
+        wait_forever = timeout < -0.001
         while time_left > 0.0 or wait_forever:
-            new_watchdog_timeout = (
+            watchdog_timeout = (
                 self.pop_watchdog_timeout
                 if wait_forever
                 else min(self.pop_watchdog_timeout, time_left)
             )
             if self.with_watchdog:
                 _ = fs_structs.watchdog.wait_until_file_event(
-                    [queue.base_path], [], ["created"], timeout=new_watchdog_timeout
+                    watch_paths, [], ["created"], timeout=watchdog_timeout
                 )
-                # Wait random time to minimize probability of race conditions
+                # Wait a random time to minimize the probability of races.
                 sleep(*self.pop_sleep_watchdog)
             else:
                 sleep(*self.pop_sleep)  # Standard polling delay
 
-            if ok := try_pop(queue_name, queue):
+            if ok := try_pop():
                 return ok
 
             time_left = timeout - (time.time() - start_time)
         return None  # Timeout reached
 
-    def pop_multiple(self, queue_names: list, timeout: float = -1) -> tuple | None:
-        """Blocking pop(0) from multiple FIFO queues in priority order (highest first).
+    def pop(self, queue_name: str, timeout: float = -1) -> tuple | None:
+        """Blocking pop of the first item of a FIFO queue. Used by clients.
 
         Args:
-            queue_names: List of queue names (ordered by priority - highest first)
-            timeout: Maximum wait time in seconds (< 0 = waits indefinitely, 0 = try once)
+            queue_name: Queue reference.
+            timeout: < 0 waits indefinitely, 0 tries once, > 0 waits at
+                most that many seconds.
 
         Returns:
-            tuple: (queue_name, value) if item found, None if timeout reached
+            tuple: (queue_name, value), or None on timeout.
 
-        Note:
-            - Used by workers
-            - Checks queues in order until item is found
-            - Supports both watchdog and polling modes
         """
+        queue = self.namespace.list(queue_name)
 
-        def try_pop_multiple(queue_refs):
+        def try_pop():
+            try:
+                # pop(0) instead of pop_left: only one client per responses queue.
+                return (queue_name, queue.pop(0))
+            except (IndexError, KeyError):
+                return False
+
+        return self._pop_loop(try_pop, [queue.base_path], timeout)
+
+    def pop_multiple(self, queue_names: list, timeout: float = -1) -> tuple | None:
+        """Blocking pop from multiple FIFO queues in priority order. Used by workers.
+
+        Args:
+            queue_names: Queue references, highest priority first.
+            timeout: < 0 waits indefinitely, 0 tries once, > 0 waits at
+                most that many seconds.
+
+        Returns:
+            tuple: (queue_name, value), or None on timeout.
+
+        """
+        queue_refs = [(q, self.namespace.list(q)) for q in queue_names]
+
+        def try_pop():
             for q_name, queue in queue_refs:
                 try:
                     return (q_name, queue.pop_left(wait=self.pop_race_wait))
@@ -356,48 +233,11 @@ class FileSystemConnector:
                     continue
             return False
 
-        queue_refs = [(q, self.namespace.list(q)) for q in queue_names]
-
-        # Walrus operator, introduced in Python 3.8
-        if ok := try_pop_multiple(queue_refs):
-            return ok
-
-        watch_paths = [q[1].base_path for q in queue_refs]
-
-        start_time = time.time()
-        time_left = timeout
-        wait_forever = True if timeout < -0.001 else False
-        while time_left > 0.0 or wait_forever:
-            new_watchdog_timeout = (
-                self.pop_watchdog_timeout
-                if wait_forever
-                else min(self.pop_watchdog_timeout, time_left)
-            )
-
-            if self.with_watchdog:
-                _ = fs_structs.watchdog.wait_until_file_event(
-                    watch_paths,
-                    [],
-                    ["created"],
-                    timeout=new_watchdog_timeout,
-                )
-                sleep(*self.pop_sleep_watchdog)
-            else:
-                sleep(*self.pop_sleep)
-            # Walrus operator, introduced in Python 3.8
-            if ok := try_pop_multiple(queue_refs):
-                return ok
-
-            time_left = timeout - (time.time() - start_time)
-
-        return None  # Timeout expired
+        return self._pop_loop(try_pop, [q.base_path for _, q in queue_refs], timeout)
 
     def pop_all(self, queue_name: str) -> list:
-        """Pops all available messages in the queue named queue_name (in order).
-
-        Used by clients.
-        """
+        "Pops every available message of the queue, in order. Used by clients."
         queue = self.namespace.list(queue_name)
         N = len(queue)
-        # using pop(0) instead of pop_left. Expected only one client per results queue
+        # pop(0) instead of pop_left: only one client per responses queue.
         return [queue.pop(0) for _ in range(N)]

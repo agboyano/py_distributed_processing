@@ -4,12 +4,13 @@ from collections import deque
 import pytest
 
 from distributed_processing.client import Client
+from distributed_processing.connector import Connector
 from distributed_processing.serializers import JsonSerializer
 from distributed_processing.worker import Worker
 
 
-class MemoryConnector:
-    """In-memory connector implementing the connector contract.
+class MemoryConnector(Connector):
+    """In-memory connector: the smallest complete implementation of `Connector`.
 
     Client and worker share the same instance (same process), which makes
     it possible to unit test the whole request/response cycle without
@@ -20,63 +21,43 @@ class MemoryConnector:
     the tests still check that every message is JSON-serializable.
     """
 
+    sep = "_"
+    id_prefix = "mem"
+
     def __init__(self, serializer=None):
         self.serializer = JsonSerializer() if serializer is None else serializer
-        self.queues = {}
-        self.methods = {}  # method -> [queue_ref, ...]
-        self.workers = {}  # queue_ref -> [worker_id, ...]
-        self.nclients = 0
-        self.nservers = 0
+        self.queues = {}  # queue_ref -> deque of encoded messages
+        self.sets = {}  # registry key -> set of members
+        self.counters = {}  # counter key -> int
 
-    # --- names ---
-    def get_requests_queue(self, queue_name):
-        return f"requests_{queue_name}"
+    def clean_namespace(self):
+        self.queues.clear()
+        self.sets.clear()
+        self.counters.clear()
 
-    def requests_queue_name(self, queue_ref):
-        return queue_ref.removeprefix("requests_")
+    # --- primitives ---
+    def _incr(self, key):
+        self.counters[key] = self.counters.get(key, 0) + 1
+        return self.counters[key]
 
-    def get_responses_queue(self, client_id):
-        return f"{client_id}_responses"
+    def _set_add(self, key, members):
+        self.sets.setdefault(key, set()).update(members)
 
-    def get_reply_to_from_id(self, id_str):
-        return id_str.split(":")[0] + "_responses"
+    def _set_discard(self, key, members):
+        current = self.sets.get(key, set())
+        members = set(members)
+        removed = len(current & members)
+        current -= members
+        return removed
 
-    def get_client_id(self):
-        self.nclients += 1
-        return f"mem_client_{self.nclients}"
+    def _set_members(self, key):
+        return set(self.sets.get(key, set()))
 
-    def get_server_id(self):
-        self.nservers += 1
-        return f"mem_server_{self.nservers}"
+    def _set_keys(self, prefix):
+        return [k for k in self.sets if k.startswith(prefix)]
 
-    # --- registry ---
-    def register_methods(self, requests_queues_dict, worker_id):
-        for queue_ref, func_dict in requests_queues_dict.items():
-            for method in func_dict:
-                self.methods.setdefault(method, [])
-                if queue_ref not in self.methods[method]:
-                    self.methods[method].append(queue_ref)
-            self.workers.setdefault(queue_ref, [])
-            if worker_id not in self.workers[queue_ref]:
-                self.workers[queue_ref].append(worker_id)
-
-    def unregister_methods(self, worker_id):
-        for queue_ref in list(self.workers):
-            if worker_id in self.workers[queue_ref]:
-                self.workers[queue_ref].remove(worker_id)
-
-    def methods_registry(self):
-        return {k: list(v) for k, v in self.methods.items()}
-
-    def workers_registry(self):
-        return {k: list(v) for k, v in self.workers.items()}
-
-    def all_queues_for_method(self, method):
-        return list(self.methods.get(method, []))
-
-    def random_queue_for_method(self, method):
-        queues = self.all_queues_for_method(method)
-        return queues[0] if queues else None
+    def _set_delete(self, key):
+        self.sets.pop(key, None)
 
     # --- queues ---
     def enqueue(self, queue, msg):
