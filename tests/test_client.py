@@ -130,12 +130,25 @@ class TestBatch:
         with pytest.raises(ValueError):
             client.send_batch_request([])
 
-    def test_explicit_queue_must_be_common(self, connector):
-        _, _, client = self._setup_two_workers(connector)
+    def test_explicit_queue_is_used_as_is(self, connector):
+        w1, _, client = self._setup_two_workers(connector)
+
+        # 'cache' mode, but the explicit queue is not checked against the
+        # registry: the batch lands in q1 although q1 does not offer 'mul'.
+        fs = client.rpc_batch_async(
+            [("add", [1, 2], None), ("mul", [3, 4], None)], queue="q1"
+        )
+        w1.run_once(timeout=0.1)
+        assert [f.safe_get(timeout=1) for f in fs] == [3, None]
+        assert fs[1].error["code"] == -32601
+
+    def test_cache_mode_does_not_fall_back_to_default_queue(self, connector):
+        self._setup_two_workers(connector)
+        client = Client(connector, check_registry="cache", default_queue="q1")
+
         with pytest.raises(ValueError):
-            client.send_batch_request(
-                [("add", [1, 2], None), ("mul", [3, 4], None)], queue="q1"
-            )
+            client.rpc_async("nope", [1])
+        assert connector.pop_all(connector.get_requests_queue("q1")) == []
 
     def test_never_mode_uses_explicit_queue_as_is(self, connector):
         _, w2, _ = self._setup_two_workers(connector)

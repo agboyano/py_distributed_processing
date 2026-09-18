@@ -15,7 +15,8 @@ transport is pluggable via **connectors**: Redis or a shared filesystem
 - Batch requests (a single message, a single worker) and multi requests
   (spread across workers): `rpc_batch_*`, `rpc_multi_*`.
 - Method registry: clients discover which queues serve each method
-  (`check_registry="cache" | "always" | other`).
+  (`check_registry="cache" | "always" | "never"`). An explicit `queue` on
+  any request is used as is; `default_queue` is the target of `"never"`.
 - Queues with priorities; queues of equal priority are shuffled on each
   iteration.
 - Notifications (requests without a response), optional acks and retries

@@ -202,10 +202,10 @@ class AsyncResult:
         Only retries if the request is pending.
 
         Args:
-            queue (str, optional): queue to sent the request. Defaults to None.
-                If None, selects the queue based on:
-                - Available queues for the method if client's `check_registry` is 'always' or 'cache'
-                - Client's `default_requests_queue` attribute otherwise.
+            queue (str, optional): Queue to resend the request to. Defaults to
+                None, which means the queue of the original request. If given,
+                used as is (the registry is not consulted); see
+                `Client.rpc_async` for the rules.
 
         Returns:
             bool: True if the request has been retried, False if not (request already received).

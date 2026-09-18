@@ -73,19 +73,25 @@ class Client:
             Python objects; the connector owns the wire encoding.
         client_id (str, optional): Client identifier. Defaults to None.
             If None, a new one is requested to the connector.
-        check_registry (str): How to select the queue for a method.
-            Defaults to 'cache'.
+        check_registry (str): How to choose the queue of a request sent
+            **without** an explicit `queue`. Defaults to 'cache'. An
+            explicit `queue` is always used as is, in every mode: the
+            registry is not consulted (so queues added with
+            `register=False` are reachable) and the worker answers -32601
+            for methods it does not offer.
             - 'cache': choose among the queues in the local registry cache
-              (refreshed with `update_registry_cache`).
+              (refreshed with `update_registry_cache`). ValueError if no
+              queue serves the method.
             - 'always': check the connector registry on every request.
-              Huge overhead.
-            - Any other value: always send to the default queue
-              (see `set_default_queue`).
+              Huge overhead. ValueError if no queue serves the method.
+            - 'never' (or any other value): send to `default_queue`
+              without consulting the registry.
         use_reply_to (bool): If True, requests include the client's
             responses queue in the `reply_to` key. Defaults to False
             (workers derive the responses queue from the request `id`).
-        default_queue (str): Simple name of the default requests queue.
-            Defaults to 'default'.
+        default_queue (str): Simple name of the default requests queue,
+            used only with `check_registry='never'` and no explicit
+            `queue`. Defaults to 'default'.
         timeout (float, optional): Default timeout in seconds for waiting
             responses. Defaults to 5 * 60. If None, wait forever.
 
@@ -143,7 +149,7 @@ class Client:
         self.timeout = timeout
 
     def set_default_queue(self, queue: str) -> None:
-        "Sets the default requests queue from its simple name."
+        "Sets the default requests queue (used only with `check_registry='never'` and no explicit `queue`)."
         self.default_queue_ref = self.connector.get_requests_queue(queue)
 
     # ---- shared variables (delegated to the connector) -----------------------
@@ -295,21 +301,27 @@ class Client:
         return sorted(ws)
 
     def _select_queue_ref(self, method: str) -> str:
-        """Selects a queue where the request with the method is going to be sent.
+        """Chooses the queue for a request sent without an explicit `queue`.
 
-        Selects the queue based on:
-                 - If client's `check_registry` is 'always', calls the `random_queue_for_method` of the
-                     connector instance (connector attribute of the client's instance).
-                 - If client's `check_registry` is 'cache', choose a random queue from the available
-                     queues for the method based on the information available in the client's cache.
-                     The information should be updated with the `update_registry_cache` method.
-                 - Client's `default_requests_queue` attribute otherwise.
+        Only called when no queue was given (an explicit queue is always used
+        as is). The choice depends on `check_registry`:
 
-         Args:
-             method (str): method to request.
+        - 'always': a random queue serving `method`, read from the connector
+          registry on every call.
+        - 'cache': a random queue serving `method`, from the local cache;
+          the cache is refreshed once if the method is missing.
+        - 'never' (or any other value): `default_queue_ref`, without
+          consulting the registry.
 
-         Returns:
-             str: Queue where the request with the method is going to be sent.
+        Args:
+            method (str): Remote method name.
+
+        Returns:
+            str: Queue reference.
+
+        Raises:
+            ValueError: With 'always'/'cache', if no queue serves `method`.
+                `default_queue` is not used as a fallback in those modes.
 
         """
         if self.check_registry == "always":
@@ -364,10 +376,10 @@ class Client:
                 If None and the Client's `use_reply_to` is True, uses the Client's `responses_queue` attribute.
                 Doesn't set `reply_to` otherwise. If `reply_to` is not defined in the `request`
                 message, the worker can respond guessing the `response_queue` from the `request` `id`.
-            queue (str, optional): Queue to send the request to. Defaults to None. If None, selects
-                the queue based on:
-                - Available queues for the method if client's `check_registry` is 'always' or 'cache'
-                - Client's `default_requests_queue` attribute otherwise.
+            queue (str, optional): Queue to send the request to. Defaults to None.
+                If given, the request is sent to that queue as is (the registry is
+                not consulted; the worker answers -32601 if it lacks the method).
+                If None, chosen by `_select_queue_ref` according to `check_registry`.
             ack (bool, optional): True if the worker sends a ack message when the request is received. False or
                 None otherwise. Defaults to None.
             is_notification (bool): True if is a `notification` (a `request` with no `id`).
@@ -427,11 +439,11 @@ class Client:
                 The tuples match the first three positional args of the
                 `single_request` function and must have exactly three items.
             queue (str, optional): Queue to send the batch request to. Defaults to None.
-                If None, selects randomly one of the common queues available for all the methods
-                in `requests_lst` (the default queue when `check_registry` is 'never').
-                With `check_registry` 'cache' or 'always' an explicit queue must be one of
-                those common queues; with 'never' it is used as is, without consulting the
-                registry, and the worker answers -32601 for the methods it does not offer.
+                If given, the batch is sent to that queue as is (the registry is not
+                consulted; the worker answers -32601 for methods it does not offer).
+                If None, chosen by `check_registry`: with 'cache'/'always', a random
+                queue among those serving every method in `requests_lst` (ValueError
+                if there is none); with 'never', `default_queue`.
             retry (bool, optional): Currently ignored. Batch requests carry no
                 retry info, so they cannot be retried individually.
             ack (bool, optional): Currently ignored. The individual requests
@@ -442,21 +454,18 @@ class Client:
             list(str): List of ids of the individual sent requests.
 
         Raises:
-            ValueError: If the batch is empty; or, when the registry is consulted
-                ('cache'/'always'), if there is no common queue for all the methods
-                or `queue` is not one of them.
+            ValueError: If the batch is empty, or if `queue` is None and no queue
+                serves every method in the batch.
 
         """
         if len(requests_lst) == 0:
             raise ValueError("Empty batch request.")
 
-        uses_registry = self.check_registry in ("cache", "always")
-
-        if queue is not None and not uses_registry:
-            # 'never' means "trust the caller", as send_single_request does
-            # with an explicit queue. Intersecting here would be a fiction:
-            # without the registry every method maps to the default queue,
-            # so any other explicit queue would be rejected.
+        if queue is not None:
+            # Same rule as send_single_request: an explicit queue is used as
+            # is. The registry only drives the choice when no queue is given;
+            # once the caller names one, the worker's -32601 answers are the
+            # check (and queues added with register=False stay reachable).
             queue_ref = self.connector.get_requests_queue(queue)
         else:
             queue_refs_sets = [
@@ -464,20 +473,14 @@ class Client:
             ]
 
             # The batch is processed by a single worker, so the target queue
-            # must be available for every method in the batch.
+            # must be available for every method in the batch. With
+            # check_registry 'never' every set is {default_queue}.
             requests_queue_refs = list(set.intersection(*queue_refs_sets))
 
             if len(requests_queue_refs) == 0:
                 raise ValueError("No common queue for batch request.")
 
-            if queue is not None:
-                queue_ref = self.connector.get_requests_queue(queue)
-                if queue_ref not in requests_queue_refs:
-                    raise ValueError(
-                        f"{queue} not in common available queues for batch request."
-                    )
-            else:
-                queue_ref = random.choice(requests_queue_refs)
+            queue_ref = random.choice(requests_queue_refs)
 
         reply_to = None if not self.use_reply_to else self.responses_queue
 
@@ -719,9 +722,10 @@ class Client:
             args (list): Positional args. Defaults to [].
             kwargs (dict): Named args. Defaults to {}.
             queue (str, optional): Queue to send the request to. Defaults to None.
-                If None, selects the queue based on:
-                - Available queues for the method if client's `check_registry` is 'always' or 'cache'
-                - Client's `default_requests_queue` attribute otherwise.
+                If given, the request is sent to that queue as is (the registry is
+                not consulted; the worker answers -32601 if it lacks the method).
+                If None, chosen by `check_registry`: a queue serving the method in
+                'cache'/'always' (ValueError if there is none), `default_queue` in 'never'.
             retry (bool): Include requests info in AsyncResult object in
                 order to make possible retrying the request. Defaults to False.
             ack (bool, optional): True if the worker sends a ack message when the request is received. False or
@@ -749,9 +753,10 @@ class Client:
             args (list): Positional args. Defaults to [].
             kwargs (dict): Named args. Defaults to {}.
             queue (str, optional): Queue to send the request to. Defaults to None.
-                If None, selects the queue based on:
-                - Available queues for the method if client's `check_registry` is 'always' or 'cache'
-                - Client's `default_requests_queue` attribute otherwise.
+                If given, the request is sent to that queue as is (the registry is
+                not consulted; the worker answers -32601 if it lacks the method).
+                If None, chosen by `check_registry`: a queue serving the method in
+                'cache'/'always' (ValueError if there is none), `default_queue` in 'never'.
             timeout (float, optional): Defaults to None (self.timeout).
                 If 0, check queue once.
 
@@ -780,11 +785,11 @@ class Client:
                 The tuples must have exactly three items. A per-request queue is
                 not supported: the whole batch is sent to a single common queue.
             queue (str, optional): Queue to send the batch request to. Defaults to None.
-                If None, selects randomly one of the common queues available for all the methods
-                in `requests_lst` (the default queue when `check_registry` is 'never').
-                With 'cache'/'always' an explicit queue must be one of those common queues;
-                with 'never' it is used as is and the worker answers -32601 for the
-                methods it does not offer.
+                If given, the batch is sent to that queue as is (the registry is not
+                consulted; the worker answers -32601 for methods it does not offer).
+                If None, chosen by `check_registry`: with 'cache'/'always', a random
+                queue among those serving every method in `requests_lst` (ValueError
+                if there is none); with 'never', `default_queue`.
             retry (bool, optional): Currently ignored. The AsyncResult objects
                 are created without retry info, so the individual requests
                 cannot be retried.
@@ -814,7 +819,8 @@ class Client:
             timeout (float, optional): Defaults to None (self.timeout).
                 If 0, check queue once.
             queue (str, optional): Queue to send the batch request to.
-                Defaults to None. Same rules as `rpc_batch_async`.
+                Defaults to None. If given, used as is; if None, chosen by
+                `check_registry`. Same rules as `rpc_batch_async`.
 
         Returns:
             list: List of (results or None on error or timeout)
@@ -836,6 +842,8 @@ class Client:
                 The tuples match the first four positional args of the `rpc_async`
                 method. They can have less than four items. In this case, they will
                 use the default values for the `rpc_async` args that are not in the tuple.
+                A `queue` in the tuple is used as is; without it the queue is chosen
+                per request according to `check_registry` (see `rpc_async`).
             retry (bool): Include requests info in the AsyncResult objects in
                 order to make possible retrying every individual request. Defaults to False.
             ack (bool, optional): True if the worker sends a ack message when the request is received. False or
@@ -858,14 +866,17 @@ class Client:
                 The tuples match the first four positional args of the `rpc_async`
                 method. They can have less than four items. In this case, they will
                 use the default values for the `rpc_async` args that are left out of the tuple.
+                A `queue` in the tuple is used as is; without it the queue is chosen
+                per request according to `check_registry` (see `rpc_async`).
             timeout (float, optional): Defaults to None (self.timeout).
                 If 0, check queue once.
 
         Returns:
-            list: List of (results or None on error).
+            list: List of (results or None on error or timeout, via `safe_get`).
 
         Raises:
-            TimeoutError
+            ValueError: If a request has no `queue` and no queue serves its method
+                ('cache'/'always').
 
         """
         fs = self.rpc_multi_async(requests_lst, retry=False)
@@ -887,9 +898,10 @@ class Client:
             args (list): Positional args. Defaults to [].
             kwargs (dict): Named args. Defaults to {}.
             queue (str, optional): Queue to send the request to. Defaults to None.
-                If None, selects the queue based on:
-                - Available queues for the method if client's `check_registry` is 'always' or 'cache'
-                - Client's `default_requests_queue` attribute otherwise.
+                If given, the request is sent to that queue as is (the registry is
+                not consulted; the worker answers -32601 if it lacks the method).
+                If None, chosen by `check_registry`: a queue serving the method in
+                'cache'/'always' (ValueError if there is none), `default_queue` in 'never'.
             retry (bool): Include requests info in AsyncResult object in
                 order to make possible retrying the request. Defaults to False.
             ack (bool, optional): True if the worker sends a ack message when the request is received. False or
@@ -920,9 +932,10 @@ class Client:
             args (list): Positional args. Defaults to [].
             kwargs (dict): Named args. Defaults to {}.
             queue (str, optional): Queue to send the request to. Defaults to None.
-                If None, selects the queue based on:
-                - Available queues for the method if client's `check_registry` is 'always' or 'cache'
-                - Client's `default_requests_queue` attribute otherwise.
+                If given, the request is sent to that queue as is (the registry is
+                not consulted; the worker answers -32601 if it lacks the method).
+                If None, chosen by `check_registry`: a queue serving the method in
+                'cache'/'always' (ValueError if there is none), `default_queue` in 'never'.
             timeout (float, optional): Defaults to None (self.timeout).
                 If 0, check queue once.
 
