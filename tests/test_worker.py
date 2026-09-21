@@ -1,3 +1,4 @@
+import threading
 import time
 
 import pytest
@@ -278,6 +279,92 @@ class TestRunForever:
         w = self._worker_that_stops_itself(flaky)
         with pytest.raises(KeyboardInterrupt):
             w.run_forever(backoff=(0.001, 0.002))
+
+
+class HeartbeatFailsAfterFirst:
+    """Wraps a connector so that `heartbeat` raises from the second call on."""
+
+    def __init__(self, connector):
+        self._connector = connector
+        self.calls = 0
+
+    def heartbeat(self, worker_id):
+        self.calls += 1
+        if self.calls > 1:
+            raise PermissionError("drive not ready")
+        self._connector.heartbeat(worker_id)
+
+    def __getattr__(self, name):
+        return getattr(self._connector, name)
+
+
+class TestHeartbeat:
+    def test_run_beats_while_running_and_deletes_on_return(self, connector):
+        w = Worker(connector, heartbeat_interval=0.05)
+        w.add_requests_queue("q", {"add": add})
+
+        t = threading.Thread(target=w.run, kwargs={"timeout": 0.5}, daemon=True)
+        t.start()
+        time.sleep(0.15)
+        first = connector.heartbeats()[w.worker_id]
+        assert w.worker_id in connector.alive_workers(max_age=1)
+        time.sleep(0.12)
+        assert connector.heartbeats()[w.worker_id] > first  # it keeps beating
+        t.join(timeout=5)
+
+        assert w.worker_id not in connector.heartbeats()
+        assert w._heartbeat_thread is None
+
+    def test_run_forever_beats_and_stops_with_the_loop(self, connector):
+        w = Worker(connector, heartbeat_interval=0.05)
+
+        def halt():
+            assert w.worker_id in connector.heartbeats()
+            w.stop()
+            return "bye"
+
+        w.add_requests_queue("q", {"halt": halt})
+        send_request(connector, "q", single_request("halt", id="cli:1"))
+        w.run_forever(backoff=(0.01, 0.02))
+
+        (r,) = pop_responses(connector, "cli")
+        assert r["result"] == "bye"
+        assert w.worker_id not in connector.heartbeats()
+
+    def test_disabled_heartbeat_writes_nothing(self, connector, worker):
+        w = Worker(connector, heartbeat_interval=None)
+        w.add_requests_queue("q", {"add": add})
+        w.start_heartbeat()
+        w.run(timeout=0.1)
+        assert connector.heartbeats() == {}
+
+    def test_run_once_alone_does_not_beat(self, connector, worker):
+        worker.run_once(timeout=0.05)
+        assert connector.heartbeats() == {}
+
+    def test_start_is_idempotent_and_close_stops(self, connector):
+        w = Worker(connector, heartbeat_interval=10)
+        w.start_heartbeat()
+        thread = w._heartbeat_thread
+        w.start_heartbeat()
+        assert w._heartbeat_thread is thread
+        assert w.worker_id in connector.heartbeats()
+
+        w.close()
+        assert w.worker_id not in connector.heartbeats()
+        assert not thread.is_alive()
+        w.stop_heartbeat()  # idempotent
+
+    def test_heartbeat_failure_is_logged_not_raised(self, connector, caplog):
+        flaky = HeartbeatFailsAfterFirst(connector)
+        w = Worker(flaky, heartbeat_interval=0.03)
+        w.add_requests_queue("q", {"add": add})
+
+        with caplog.at_level("ERROR", logger="distributed_processing.worker"):
+            w.run(timeout=0.2)
+
+        assert flaky.calls >= 3
+        assert any("heartbeat failed" in m for m in caplog.messages)
 
 
 class TestLifecycle:

@@ -6,6 +6,7 @@ integration case (real directory); the Redis one runs on `FakeRedis`.
 """
 
 import threading
+import time
 
 import pytest
 from conftest import MemoryConnector
@@ -237,6 +238,56 @@ class TestVariables:
         assert connector.get_variable("add") == "not a method"
 
 
+class TestHeartbeats:
+    def test_heartbeat_is_recorded_and_deleted(self, connector):
+        before = time.time()
+        connector.heartbeat("w1")
+        beats = connector.heartbeats()
+        assert set(beats) == {"w1"}
+        assert before <= beats["w1"] <= time.time()
+
+        assert connector.delete_heartbeat("w1") is True
+        assert connector.delete_heartbeat("w1") is False
+        assert connector.heartbeats() == {}
+
+    def test_alive_workers_expire_with_max_age(self, connector):
+        connector.heartbeat("old")
+        time.sleep(0.2)
+        connector.heartbeat("fresh")
+
+        assert connector.alive_workers(max_age=60) == {"old", "fresh"}
+        assert connector.alive_workers(max_age=0.1) == {"fresh"}
+
+    def test_heartbeats_are_not_variables(self, connector):
+        connector.heartbeat("w1")
+        connector.set_variable("w1", "a variable, not a heartbeat")
+        assert connector.variables() == ["w1"]
+        assert connector.get_variable("w1") == "a variable, not a heartbeat"
+        assert set(connector.heartbeats()) == {"w1"}
+        connector.delete_variable("w1")
+        assert set(connector.heartbeats()) == {"w1"}
+
+    def test_prune_dead_workers_only_removes_stale_heartbeats(self, connector):
+        q1, q2 = register_two_workers(connector)  # w1 and w2, no heartbeats yet
+        q3 = connector.get_requests_queue("q3")
+        connector.register_methods({q3: {"mul": fn}}, "w3")
+
+        connector.heartbeat("w3")  # will go stale
+        time.sleep(0.2)
+        connector.heartbeat("w2")  # fresh; w1 never beats
+
+        assert connector.prune_dead_workers(max_age=0.1) == ["w3"]
+
+        workers = connector.workers_registry()
+        assert q3 not in workers  # w3 was its only worker
+        assert sorted(workers[q1]) == ["w1", "w2"]  # w1 kept: no heartbeat key
+        assert workers[q2] == ["w2"]
+        assert set(connector.heartbeats()) == {"w2"}
+        # Idempotent: nothing stale is left (a large max_age keeps w2 fresh
+        # even on a slow filesystem).
+        assert connector.prune_dead_workers(max_age=60) == []
+
+
 class TestNamespace:
     def test_clean_namespace_resets_registry_and_ids(self, connector):
         q1, _ = register_two_workers(connector)
@@ -244,6 +295,7 @@ class TestNamespace:
         connector.enqueue(q1, 1)
         connector.enqueue(connector.get_responses_queue(first), 2)
         connector.set_variable("v", 1)
+        connector.heartbeat("w1")
 
         connector.clean_namespace()
 
@@ -254,6 +306,7 @@ class TestNamespace:
         assert connector.get_client_id() == first
         assert connector.get_variable("v") is None
         assert connector.variables() == []
+        assert connector.heartbeats() == {}
 
 
 def test_subclass_missing_a_primitive_cannot_be_instantiated():

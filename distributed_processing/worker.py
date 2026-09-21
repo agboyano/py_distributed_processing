@@ -4,6 +4,7 @@ import base64
 import inspect
 import logging
 import random
+import threading
 from datetime import datetime
 from time import sleep, time
 from typing import Any, Callable
@@ -92,6 +93,11 @@ class Worker:
         reply_to_default (str, optional): Default response queue, only used
             when the incoming request has no `reply_to` key. Defaults to
             None (derive the response queue from the request `id`).
+        heartbeat_interval (float, optional): Seconds between heartbeats
+            while `run` or `run_forever` is running (see `start_heartbeat`).
+            Defaults to 10. None disables heartbeats. Clients consider a
+            worker dead after `max_age` seconds without a heartbeat (30 by
+            default), so keep `max_age >= 3 * heartbeat_interval`.
 
     """
 
@@ -101,8 +107,12 @@ class Worker:
         worker_id: str | None = None,
         with_trace: bool = True,
         reply_to_default: str | None = None,
+        heartbeat_interval: float | None = 10.0,
     ):
         self.connector = connector
+        self.heartbeat_interval = heartbeat_interval
+        self._heartbeat_thread: threading.Thread | None = None
+        self._heartbeat_stop = threading.Event()
 
         # Insertion order defines queue priority (dicts respect key
         # insertion order since Python 3.7).
@@ -317,16 +327,79 @@ class Worker:
 
         self.connector.register_methods(queues_to_register, self.worker_id)
 
+    # Implementation notes.
+    #
+    # The heartbeat runs in its own daemon thread, not in the `run_once`
+    # loop. The loop blocks in `pop_multiple(timeout=-1)` while there are no
+    # requests, and it blocks for the whole execution of a registered
+    # function; a worker busy for ten minutes would look dead. Telling
+    # "busy" apart from "died in the middle of a task" is the point of the
+    # heartbeat, so it must beat while the loop is blocked.
+    #
+    # The thread only calls `connector.heartbeat`, one write to the value
+    # store. redis-py shares a thread-safe connection pool, an `fs_structs`
+    # set is one atomic rename and the in-memory connector is a dict, so
+    # the thread needs no lock of its own. A transport error is logged and
+    # the thread carries on: a hiccup on a shared drive must not kill the
+    # worker (`run_forever` has the same policy for the main loop).
+    #
+    # `Event.wait(interval)` is the sleep: `stop_heartbeat` sets the event
+    # and the thread returns at once instead of after the interval.
+    def start_heartbeat(self) -> None:
+        """Starts the heartbeat thread. Idempotent; no-op if disabled.
+
+        Writes one heartbeat immediately and then one every
+        `heartbeat_interval` seconds until `stop_heartbeat`. `run` and
+        `run_forever` call it for you; call it yourself only if you drive
+        the worker with `run_once`.
+        """
+        if self.heartbeat_interval is None:
+            return
+        if self._heartbeat_thread is not None and self._heartbeat_thread.is_alive():
+            return
+
+        self._heartbeat_stop.clear()
+        self.connector.heartbeat(self.worker_id)
+
+        def beat():
+            while not self._heartbeat_stop.wait(self.heartbeat_interval):
+                try:
+                    self.connector.heartbeat(self.worker_id)
+                except Exception:
+                    logger.exception(
+                        f"{timestamp()} Worker: {self.worker_id} heartbeat failed."
+                    )
+
+        self._heartbeat_thread = threading.Thread(
+            target=beat, name=f"heartbeat-{self.worker_id}", daemon=True
+        )
+        self._heartbeat_thread.start()
+
+    def stop_heartbeat(self) -> None:
+        """Stops the heartbeat thread and deletes the worker's heartbeat.
+
+        A worker that stops cleanly disappears from `alive_workers` at
+        once; a worker that dies leaves a heartbeat that goes stale.
+        Idempotent.
+        """
+        self._heartbeat_stop.set()
+        thread = self._heartbeat_thread
+        if thread is not None:
+            thread.join(timeout=5)
+            self._heartbeat_thread = None
+            self.connector.delete_heartbeat(self.worker_id)
+
     def unregister(self) -> None:
         "Removes the worker's queues and methods from the public registry."
         logger.debug(f"{timestamp()} Worker: {self.worker_id} unregistering.")
         self.connector.unregister_methods(self.worker_id)
 
     def close(self) -> None:
-        """Unregister the worker's public queues and methods. Idempotent."""
+        """Stop the heartbeat and unregister the worker's public queues and methods. Idempotent."""
         if self._closed:
             return
         self._closed = True
+        self.stop_heartbeat()
         self.unregister()
 
     def __enter__(self) -> Worker:
@@ -735,17 +808,22 @@ class Worker:
         """Listen and process requests, forever or for `timeout` seconds.
 
         Any exception raised by the connector propagates and ends the loop.
-        For a long-running service prefer `run_forever`.
+        For a long-running service prefer `run_forever`. The heartbeat
+        thread runs while the loop does (see `start_heartbeat`).
         """
-        if timeout is None or timeout <= -0.00001:
-            while True:
-                self.run_once(timeout=-1.0)
+        self.start_heartbeat()
+        try:
+            if timeout is None or timeout <= -0.00001:
+                while True:
+                    self.run_once(timeout=-1.0)
 
-        t_0 = time()
-        time_left = timeout
-        while time_left > 0:
-            self.run_once(timeout=time_left)
-            time_left = timeout - (time() - t_0)
+            t_0 = time()
+            time_left = timeout
+            while time_left > 0:
+                self.run_once(timeout=time_left)
+                time_left = timeout - (time() - t_0)
+        finally:
+            self.stop_heartbeat()
 
     def stop(self) -> None:
         """Asks `run_forever` to return after the current iteration.
@@ -769,6 +847,8 @@ class Worker:
         after an exponential backoff. Exceptions raised by the registered
         functions never reach this loop: they are answered as error
         responses. `KeyboardInterrupt` and `SystemExit` are not caught.
+        The heartbeat thread runs while the loop does (see
+        `start_heartbeat`).
 
         Args:
             backoff (tuple): (first, max) seconds to wait after an error.
@@ -790,21 +870,25 @@ class Worker:
         consecutive_errors = 0
         self._stop_requested = False
 
-        while not self._stop_requested:
-            try:
-                self.run_once(timeout=-1.0)
-                consecutive_errors = 0
-            except Exception:
-                consecutive_errors += 1
-                wait = min(max_wait, first_wait * 2 ** (consecutive_errors - 1))
-                logger.exception(
-                    f"{timestamp()} Worker: {self.worker_id} error #{consecutive_errors} in the main loop. Retrying in {wait:.1f}s"
-                )
-                if (
-                    max_consecutive_errors is not None
-                    and consecutive_errors >= max_consecutive_errors
-                ):
-                    raise
-                sleep(wait)
+        self.start_heartbeat()
+        try:
+            while not self._stop_requested:
+                try:
+                    self.run_once(timeout=-1.0)
+                    consecutive_errors = 0
+                except Exception:
+                    consecutive_errors += 1
+                    wait = min(max_wait, first_wait * 2 ** (consecutive_errors - 1))
+                    logger.exception(
+                        f"{timestamp()} Worker: {self.worker_id} error #{consecutive_errors} in the main loop. Retrying in {wait:.1f}s"
+                    )
+                    if (
+                        max_consecutive_errors is not None
+                        and consecutive_errors >= max_consecutive_errors
+                    ):
+                        raise
+                    sleep(wait)
+        finally:
+            self.stop_heartbeat()
 
         logger.info(f"{timestamp()} Worker: {self.worker_id} stopped.")

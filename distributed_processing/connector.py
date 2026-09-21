@@ -6,7 +6,9 @@ A connector gives `Client` and `Worker` four things inside a *namespace*:
 - a small set store for the registry (which queues serve each method and
   which workers listen on each queue),
 - two counters, for unique client and worker ids,
-- a key/value store of shared variables (`set_variable`/`get_variable`).
+- a key/value store of shared variables (`set_variable`/`get_variable`),
+- worker heartbeats (`heartbeat`/`alive_workers`), stored in the same
+  key/value store under their own key family.
 
 `Connector` implements naming and the registry once, on top of a handful of
 primitives that each transport provides. The class docstring states the
@@ -18,6 +20,7 @@ from __future__ import annotations
 
 import logging
 import random
+import time
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterable
 from contextlib import AbstractContextManager, nullcontext
@@ -28,11 +31,18 @@ logger = logging.getLogger(__name__)
 # Key families of the registry (set store):
 #   {METHOD_QUEUES}{sep}{method}    -> {queue_ref, ...}  queues serving a method
 #   {WORKERS_QUEUE}{sep}{queue_ref} -> {worker_id, ...}  workers listening on a queue
-# Key family of the shared variables (value store):
-#   {VARIABLES}{sep}{name}          -> value
+# Key families of the value store:
+#   {VARIABLES}{sep}{name}          -> value                shared variables
+#   {HEARTBEATS}{sep}{worker_id}    -> time.time() of the last heartbeat
 METHOD_QUEUES = "method_queues"
 WORKERS_QUEUE = "workers_queue"
 VARIABLES = "variables"
+HEARTBEATS = "heartbeats"
+
+# Seconds without a heartbeat after which a worker is considered dead.
+# Three times the default `Worker.heartbeat_interval` (10 s): one missed
+# beat and a few seconds of clock skew between machines do not count.
+DEFAULT_HEARTBEAT_MAX_AGE = 30.0
 
 # Sentinel for "no default given" in `update_variable`, so that an explicit
 # `default=None` is still a valid default.
@@ -102,6 +112,23 @@ class Connector(ABC):
         in their own key family, apart from the registry, and are not
         covered by `_registry_lock()`.
 
+    Heartbeats
+        `heartbeat(worker_id)` stores the writer's `time.time()` under the
+        worker id, in its own key family of the value store (so it never
+        shows up in `variables()`). `heartbeats()` returns
+        `{worker_id: time}`. `alive_workers(max_age)` returns the ids whose
+        heartbeat is younger than `max_age` seconds, measured with the
+        reader's clock. `delete_heartbeat(worker_id)` removes it; a worker
+        that stops cleanly does so, a worker that dies leaves a stale one.
+        `prune_dead_workers(max_age)` unregisters and deletes the workers
+        with a stale heartbeat. A registered worker **without** a heartbeat
+        key is never pruned and is not reported as dead: it may be an older
+        version or a worker with heartbeats disabled. No transport expiry
+        (Redis `EXPIRE`) is used, so the rule is the same on every
+        transport. Clocks of the machines are assumed to agree within a
+        few seconds; `max_age` must be at least three times the largest
+        heartbeat interval in use.
+
     Atomicity
         Every public registry operation runs inside `_registry_lock()`.
         Transports whose set primitives are atomic by themselves (Redis)
@@ -111,8 +138,8 @@ class Connector(ABC):
         message to exactly one consumer.
 
     Namespaces
-        `clean_namespace` deletes queues, registry, counters and variables,
-        so ids start again from 1.
+        `clean_namespace` deletes queues, registry, counters, variables and
+        heartbeats, so ids start again from 1.
 
     Encoding
         Queues and variables carry Python objects. The connector owns the
@@ -133,7 +160,7 @@ class Connector(ABC):
 
     @abstractmethod
     def clean_namespace(self) -> None:
-        "Deletes every queue, registry entry and counter of the namespace."
+        "Deletes every queue, registry entry, counter, variable and heartbeat of the namespace."
 
     @abstractmethod
     def _incr(self, key: str) -> int:
@@ -428,3 +455,94 @@ class Connector(ABC):
         "Returns the names of every shared variable, sorted."
         prefix = self._key(VARIABLES) + self.sep
         return sorted(key.removeprefix(prefix) for key in self._value_keys(prefix))
+
+    # ---- heartbeats ----------------------------------------------------------
+
+    # Implementation notes.
+    #
+    # Heartbeats reuse the value store, under their own key family, so no
+    # transport has to implement anything new: `MemoryConnector`, the fake
+    # Redis and both real connectors get them for free, and `clean_namespace`
+    # already deletes them (it clears the whole store).
+    #
+    # The stored value is the writer's `time.time()` and the reader compares
+    # it with its own clock. A Redis key with `EXPIRE` would be simpler on
+    # Redis, but the filesystem has no expiry and the contract puts the
+    # behaviour in this base class, over primitives. The price is a few
+    # seconds of clock skew between machines, absorbed by `max_age`.
+    #
+    # `heartbeats()` tolerates a key deleted between `_value_keys` and
+    # `_value_get`: a worker may stop cleanly while a client is reading.
+    def heartbeat(self, worker_id: str) -> None:
+        """Records that `worker_id` is alive now.
+
+        Called periodically by `Worker` from its heartbeat thread. The value
+        stored is the writer's `time.time()`.
+
+        Args:
+            worker_id (str): Id of the worker.
+
+        """
+        self._value_set(self._key(HEARTBEATS, worker_id), time.time())
+
+    def heartbeats(self) -> dict:
+        """Returns the last heartbeat time of every worker that has one.
+
+        Returns:
+            dict: `{worker_id: time}`, with `time` as returned by
+                `time.time()` on the worker's machine.
+
+        """
+        prefix = self._key(HEARTBEATS) + self.sep
+        out = {}
+        for key in self._value_keys(prefix):
+            try:
+                out[key.removeprefix(prefix)] = self._value_get(key)
+            except KeyError:
+                pass  # deleted meanwhile (clean shutdown of that worker)
+        return out
+
+    def alive_workers(self, max_age: float = DEFAULT_HEARTBEAT_MAX_AGE) -> set:
+        """Returns the ids of the workers with a recent heartbeat.
+
+        Args:
+            max_age (float): Seconds. A heartbeat older than this, measured
+                with the reader's clock, means the worker is dead.
+                Defaults to `DEFAULT_HEARTBEAT_MAX_AGE` (30 s).
+
+        Returns:
+            set: Worker ids whose last heartbeat is at most `max_age` old.
+                Workers without a heartbeat key are not included: see
+                `prune_dead_workers` for how they are treated.
+
+        """
+        now = time.time()
+        return {w for w, t in self.heartbeats().items() if now - t <= max_age}
+
+    def delete_heartbeat(self, worker_id: str) -> bool:
+        "Deletes the heartbeat of `worker_id`. Returns True if it existed."
+        return self._value_delete(self._key(HEARTBEATS, worker_id))
+
+    def prune_dead_workers(self, max_age: float = DEFAULT_HEARTBEAT_MAX_AGE) -> list:
+        """Unregisters the workers whose heartbeat is older than `max_age`.
+
+        Only workers **with** a stale heartbeat key are pruned: a worker
+        that dies never deletes its key. Registered workers without a key
+        (older versions, heartbeats disabled, `run_once` only) are left as
+        they are. The heartbeat key of each pruned worker is deleted too.
+
+        Args:
+            max_age (float): Seconds. Defaults to
+                `DEFAULT_HEARTBEAT_MAX_AGE` (30 s).
+
+        Returns:
+            list: Sorted ids of the pruned workers.
+
+        """
+        now = time.time()
+        dead = sorted(w for w, t in self.heartbeats().items() if now - t > max_age)
+        for worker_id in dead:
+            self.unregister_methods(worker_id)
+            self.delete_heartbeat(worker_id)
+            logger.info(f"Worker {worker_id} pruned: no heartbeat for {max_age} s.")
+        return dead

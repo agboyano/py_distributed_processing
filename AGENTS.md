@@ -11,13 +11,16 @@ responses, synchronously or through `AsyncResult`. The transport is a
 pluggable **connector**: Redis or a shared directory (`fs_structs`).
 
 - `distributed_processing/client.py`: `Client` (queue selection, request
-  sending, response cache, shared variables), `serialize_python_call`.
+  sending, response cache, shared variables, `alive_workers` /
+  `prune_dead_workers`), `serialize_python_call`.
 - `distributed_processing/worker.py`: `Worker` (queues with priorities,
-  dispatch, `check_params`, `run` / `run_forever`), `eval_py_function`.
+  dispatch, `check_params`, `run` / `run_forever`, heartbeat thread),
+  `eval_py_function`.
 - `distributed_processing/async_result.py`: `AsyncResult`, `gather`.
 - `distributed_processing/messages.py`: message construction and predicates.
 - `distributed_processing/connector.py`: `Connector` base class. Its docstring
-  is the transport contract: names, queues, registry, variables, atomicity.
+  is the transport contract: names, queues, registry, variables, heartbeats,
+  atomicity.
 - `distributed_processing/redis_connector.py`, `filesystem_connector.py`: the
   two transports. `serializers.py`: `JsonSerializer` (Redis default),
   `PickleSerializer`, `JoblibSerializer`. `utils.py`: `fsclient`, `fsworker`,
@@ -74,6 +77,15 @@ variables. Read it first.
   variable is missing and no default is given (`None` is a valid default).
   A variable updated with `update_variable` is not written with
   `set_variable`, which bypasses the lock.
+- **Heartbeats.** Stored in the value store under the `heartbeats` key
+  family, implemented once in `Connector` over the value primitives: no
+  transport expiry (`EXPIRE`), the reader compares the stored `time.time()`
+  with its own clock and `max_age` (default 30 s, three times the worker's
+  default interval). The worker beats from a daemon thread started by `run`
+  / `run_forever` and stopped in their `finally` and in `close()`; `run_once`
+  alone never beats. A registered worker without a heartbeat key counts as
+  alive and is never pruned (compatibility). Pruning is explicit
+  (`prune_dead_workers`): nothing in queue selection or in the worker does it.
 - **Ids.** Request ids are `{client_id}:{n}`; a client id may contain `:`, so
   the responses queue is derived by splitting on the last one.
   `clean_namespace` resets the counters.
@@ -82,6 +94,8 @@ variables. Read it first.
   arbitrary code sent by clients: trusted infrastructure only, and say so
   wherever it appears. `run` is for notebooks (errors stop the cell),
   `run_forever` for services (errors are logged and retried with backoff).
+  Both start the heartbeat thread; a transport error inside it is logged,
+  never raised.
 - **Compatibility.** Other projects call the public API with positional
   arguments. New parameters go last, with a default that keeps the current
   behaviour (`rpc_batch_sync` got `queue` after `timeout` for this reason).

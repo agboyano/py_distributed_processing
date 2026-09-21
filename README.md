@@ -33,6 +33,9 @@ transport is pluggable via **connectors**: Redis or a shared filesystem
 - Shared variables: `set_variable` / `get_variable` on the connector, the
   client and the worker, to publish a parameter once instead of sending it
   with every request.
+- Worker heartbeats: `run` / `run_forever` beat every 10 s from a thread;
+  `client.alive_workers()` tells which registered workers are alive and
+  `client.prune_dead_workers()` removes the dead ones from the registry.
 
 ## Installation
 
@@ -68,7 +71,9 @@ errors (a shared drive that stops responding, a lock timeout, a corrupt
 message) are logged and retried with exponential backoff instead of ending
 the process. `worker.stop()` (from a registered function or another thread)
 makes it return; use a `with Worker(...)` block, or call `close()`, so the
-worker is removed from the registry on shutdown.
+worker is removed from the registry on shutdown. Both loops send a heartbeat
+every 10 s from a thread, so clients can tell a dead worker from a busy one
+(see *Heartbeats*).
 
 ```python
 with Worker(RedisConnector("localhost")) as worker:
@@ -172,6 +177,43 @@ Rules:
   are plain string keys (`{namespace}:variables:{name}`); on the filesystem,
   one file each under `variables/`.
 
+### Heartbeats
+
+A worker that is killed, or whose machine goes down, never calls `close()`
+and stays in the registry. Heartbeats let a client tell it apart from a
+worker that is busy with a long task.
+
+While `run` or `run_forever` is running, a daemon thread writes the worker's
+`time.time()` every `heartbeat_interval` seconds (10 by default,
+`Worker(..., heartbeat_interval=None)` disables it). The thread beats even
+while a registered function runs for minutes, which the main loop could not
+do. `close()`, the end of `run` and a `with` block delete the heartbeat, so a
+clean shutdown disappears at once; a dead worker leaves a heartbeat that goes
+stale.
+
+```python
+client.alive_workers()                  # {'my_queue': ['redis_server:3']}, 30 s by default
+client.alive_workers(max_age=60)        # tolerate slower heartbeats
+client.prune_dead_workers()             # unregister stale workers, returns their ids
+```
+
+Rules:
+
+- A worker is dead when its heartbeat is older than `max_age` seconds,
+  measured with the reader's clock. Keep `max_age` at least three times the
+  largest `heartbeat_interval` in use, so one missed beat and a few seconds
+  of clock skew between machines do not count. Detection takes between
+  `max_age` and `max_age + heartbeat_interval` seconds.
+- A registered worker **without** a heartbeat (older version, heartbeats
+  disabled, driven with `run_once` only) counts as alive and is never pruned.
+  A dead worker always has one: it wrote heartbeats while alive.
+- Nothing prunes automatically. Queue selection does not look at heartbeats;
+  call `prune_dead_workers()` when you want dead queues out of the way.
+- Heartbeats are stored in the value store, in their own key family
+  (`{namespace}:heartbeats:{worker_id}` on Redis, `heartbeats_...` under
+  `variables/` on the filesystem), so they never show up in `variables()`.
+  No transport expiry is used: the rule is the same on every connector.
+
 ### Connector contract
 
 A connector is a subclass of `distributed_processing.Connector`. The base
@@ -202,7 +244,7 @@ only provides a few primitives. The full rules live in the docstring of
 - **Two counters** for unique ids. `get_client_id()` / `get_server_id()`
   return `{id_prefix}_client{sep}{n}` / `{id_prefix}_server{sep}{n}`; ids are
   never reused until `clean_namespace()`, which deletes queues, registry,
-  counters and variables.
+  counters, variables and heartbeats.
 - **Shared variables**, a key/value store of Python objects in its own key
   family. `set_variable(name, value)`, `get_variable(name, default=None)`,
   `delete_variable(name) -> bool` and `variables() -> [name, ...]` (sorted).
@@ -210,6 +252,15 @@ only provides a few primitives. The full rules live in the docstring of
   `update_variable(name, fn, default=...)` is the only read-modify-write:
   it holds `_variable_lock(key)`, one lock per variable, and returns the
   new value; `KeyError` if the variable is not set and no default is given.
+- **Heartbeats**, in the value store under their own key family.
+  `heartbeat(worker_id)` stores the writer's `time.time()`;
+  `heartbeats() -> {worker_id: time}`; `alive_workers(max_age) -> set` of
+  ids with a heartbeat at most `max_age` seconds old (reader's clock);
+  `delete_heartbeat(worker_id) -> bool`; `prune_dead_workers(max_age)`
+  unregisters and deletes the workers with a stale heartbeat and returns
+  their ids. Workers without a heartbeat key are never pruned. No transport
+  expiry is used. Implemented once in the base class: a new connector gets
+  them from the value store primitives.
 - **Names.** `get_requests_queue(name)` / `requests_queue_name(ref)` round
   trip; `get_responses_queue(client_id)`; `get_reply_to_from_id("{client_id}:{n}")`
   is the responses queue of that client.

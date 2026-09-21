@@ -12,7 +12,7 @@ from .worker import Worker
 #   from distributed_processing.redis_connector import RedisConnector
 #   from distributed_processing.filesystem_connector import FileSystemConnector
 
-__version__ = "0.0.4a0"
+__version__ = "0.0.5a0"
 
 # Library best practice: attach a NullHandler and let the application
 # configure logging (handlers, level and format).

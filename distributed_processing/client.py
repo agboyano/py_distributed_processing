@@ -10,7 +10,7 @@ from typing import Any, Callable
 import dill
 
 from .async_result import AsyncResult
-from .connector import MISSING, Connector
+from .connector import DEFAULT_HEARTBEAT_MAX_AGE, MISSING, Connector
 from .messages import is_ack, is_batch_response, is_single_response, single_request
 
 logger = logging.getLogger(__name__)
@@ -338,6 +338,70 @@ class Client:
 
         return sorted(ws)
 
+    # ---- heartbeats ----------------------------------------------------------
+
+    # Implementation notes.
+    #
+    # A registered worker without a heartbeat key counts as alive. Workers
+    # created with `heartbeat_interval=None`, driven with `run_once` only,
+    # or running an older version never write one, and reporting them dead
+    # would make every existing deployment look empty. A dead worker always
+    # has a key: it wrote heartbeats while alive and never deleted them.
+    def alive_workers(
+        self, max_age: float = DEFAULT_HEARTBEAT_MAX_AGE, update: bool = True
+    ) -> dict:
+        """Returns the registered workers that look alive, by queue.
+
+        A worker is alive if its last heartbeat is at most `max_age`
+        seconds old (reader's clock), or if it has no heartbeat at all
+        (heartbeats disabled or not started). Queues whose workers are all
+        dead are returned with an empty list.
+
+        Args:
+            max_age (float): Seconds. Defaults to
+                `DEFAULT_HEARTBEAT_MAX_AGE` (30 s). Use at least three times
+                the largest `Worker.heartbeat_interval` in use.
+            update (bool): If True, refresh the registry cache first.
+                Defaults to True.
+
+        Returns:
+            dict: `{queue_name: [worker_id, ...]}` with simple queue names
+                and sorted ids.
+
+        """
+        if update:
+            self.update_registry_cache()
+        beats = self.connector.heartbeats()
+        now = time.time()
+
+        def is_alive(worker_id):
+            return worker_id not in beats or now - beats[worker_id] <= max_age
+
+        return {
+            self.simple_queue_name(queue_ref): sorted(w for w in workers if is_alive(w))
+            for queue_ref, workers in self._registry["workers"].items()
+        }
+
+    def prune_dead_workers(self, max_age: float = DEFAULT_HEARTBEAT_MAX_AGE) -> list:
+        """Unregisters the workers whose heartbeat is older than `max_age`.
+
+        Same as `connector.prune_dead_workers`, and refreshes the registry
+        cache afterwards. Nothing calls this automatically: a worker that
+        dies stays in the registry until someone prunes it. Workers without
+        a heartbeat key are never pruned.
+
+        Args:
+            max_age (float): Seconds. Defaults to
+                `DEFAULT_HEARTBEAT_MAX_AGE` (30 s).
+
+        Returns:
+            list: Sorted ids of the pruned workers.
+
+        """
+        dead = self.connector.prune_dead_workers(max_age)
+        self.update_registry_cache()
+        return dead
+
     def _select_queue_ref(self, method: str) -> str:
         """Chooses the queue for a request sent without an explicit `queue`.
 
@@ -645,20 +709,21 @@ class Client:
     def wait_responses(
         self, ids: list | None = None, timeout: float | None = None
     ) -> list:
-        """Wait for all responses in ids.
-
-        If ids is None, waits for all pending ids.
+        """Wait for the responses to the given request ids.
 
         Args:
-            ids (list, optional): List of ids. Defaults to None.
-            timeout (float, optional): Defaults to None (self.timeout).
-                If 0, check queue once.
+            ids (list[str], optional): Request ids to wait for, as returned by
+                `AsyncResult.id` — not `AsyncResult` instances themselves.
+                Defaults to None, which waits for every pending id.
+            timeout (float, optional): Defaults to None (self.timeout). If 0,
+                the queue is checked once.
 
         Returns:
-            list: Pending ids if timeout, [] if ok.
+            list[str]: The ids still pending if the timeout expired, [] if all
+                responses arrived.
 
         Raises:
-            ValueError: If there are ids neither in responses nor in pending.
+            ValueError: If any id is neither in responses nor in pending.
         """
         if timeout is None:
             timeout = self.timeout

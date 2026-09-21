@@ -1,4 +1,5 @@
 import threading
+import time
 
 import pytest
 from conftest import add
@@ -49,6 +50,42 @@ class TestBasics:
         assert client.update_variable("v", lambda d: {**d, "b": 2}) == {"a": 1, "b": 2}
         assert client.delete_variable("v") is True
         assert client.variables() == []
+
+
+class TestHeartbeats:
+    def test_alive_workers_keeps_workers_without_heartbeat(
+        self, connector, worker, client
+    ):
+        # The fixture worker never beats (run_once only): still alive.
+        assert client.alive_workers() == {"q": [worker.worker_id]}
+
+    def test_alive_workers_drops_stale_and_keeps_fresh(self, connector, worker, client):
+        q2 = connector.get_requests_queue("q2")
+        connector.register_methods({q2: {"add": add}}, "w_stale")
+        connector.register_methods({q2: {"add": add}}, "w_fresh")
+        connector.heartbeat("w_stale")
+        time.sleep(0.2)
+        connector.heartbeat("w_fresh")
+
+        alive = client.alive_workers(max_age=0.1)
+        assert alive == {"q": [worker.worker_id], "q2": ["w_fresh"]}
+
+        # A queue whose workers are all dead is reported with an empty list.
+        q3 = connector.get_requests_queue("q3")
+        connector.register_methods({q3: {"add": add}}, "w_stale")
+        assert client.alive_workers(max_age=0.1)["q3"] == []
+
+    def test_prune_dead_workers_refreshes_the_cache(self, connector, worker, client):
+        q2 = connector.get_requests_queue("q2")
+        connector.register_methods({q2: {"mul": add}}, "w_stale")
+        connector.heartbeat("w_stale")
+        client.update_registry_cache()
+        assert client.all_queues_for_method("mul") == ["q2"]
+        time.sleep(0.2)
+
+        assert client.prune_dead_workers(max_age=0.1) == ["w_stale"]
+        assert "q2" not in client.registry()["workers"]
+        assert client.all_workers_for_method("add") == [worker.worker_id]
 
 
 class TestRpc:
