@@ -21,7 +21,10 @@ transport is pluggable via **connectors**: Redis or a shared filesystem
 - Queues with priorities; queues of equal priority are shuffled on each
   iteration.
 - Notifications (requests without a response), optional acks and retries
-  (`AsyncResult.retry`, `gather`).
+  (`AsyncResult.retry`). `gather(fs, timeout)` waits for AsyncResults of
+  several clients at once and returns the ones still pending; with
+  `retry_dead=True` it resends the requests stuck on a queue whose workers
+  are dead.
 - Sending arbitrary Python functions serialized with `dill`
   (`rpc_async_fn` + `Worker.add_python_eval`). **See security note.**
 - Connectors: Redis (`RedisConnector`) and filesystem
@@ -214,6 +217,22 @@ Rules:
   `variables/` on the filesystem), so they never show up in `variables()`.
   No transport expiry is used: the rule is the same on every connector.
 
+`gather` uses the same signal to recover requests lost with a worker:
+
+```python
+fs = [client.rpc_async("price", [isin], retry=True) for isin in isins]
+pending = gather(fs, timeout=600, retry_dead=True)   # [] when everything arrived
+```
+
+Every `step` seconds (5 by default) it checks the pending requests. One whose
+queue has no alive worker is resent once with `AsyncResult.retry`: to a queue
+with alive workers that serves the method if there is one, otherwise to the
+same queue. Only requests created with `retry=True` can be resent, and a
+request that was still in the queue runs twice if a worker comes back, so use
+`retry_dead` with idempotent functions. `gather` works across several
+`Client` instances with one common `timeout` and returns the AsyncResults
+still pending.
+
 ### Connector contract
 
 A connector is a subclass of `distributed_processing.Connector`. The base
@@ -364,7 +383,7 @@ CI (GitHub Actions) runs lint + tests on Python 3.9–3.13.
 distributed_processing/
 ├── client.py                # Client: request sending, response cache
 ├── worker.py                # Worker: queues, dispatch and method execution
-├── async_result.py          # AsyncResult and gather()
+├── async_result.py          # AsyncResult and gather() (multi-client wait, retry on dead queues)
 ├── messages.py              # message construction and validation
 ├── serializers.py           # JsonSerializer (Redis default), PickleSerializer, JoblibSerializer
 ├── connector.py             # Connector base class: contract, naming and registry

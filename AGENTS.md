@@ -16,7 +16,9 @@ pluggable **connector**: Redis or a shared directory (`fs_structs`).
 - `distributed_processing/worker.py`: `Worker` (queues with priorities,
   dispatch, `check_params`, `run` / `run_forever`, heartbeat thread),
   `eval_py_function`.
-- `distributed_processing/async_result.py`: `AsyncResult`, `gather`.
+- `distributed_processing/async_result.py`: `AsyncResult`, `gather` (waits
+  for AsyncResults of several clients, returns the pending ones,
+  `retry_dead` resends what sits on a queue without alive workers).
 - `distributed_processing/messages.py`: message construction and predicates.
 - `distributed_processing/connector.py`: `Connector` base class. Its docstring
   is the transport contract: names, queues, registry, variables, heartbeats,
@@ -86,6 +88,15 @@ variables. Read it first.
   alone never beats. A registered worker without a heartbeat key counts as
   alive and is never pruned (compatibility). Pruning is explicit
   (`prune_dead_workers`): nothing in queue selection or in the worker does it.
+- **gather.** `gather(fs, timeout, step, retry_dead, max_age) -> list` of the
+  AsyncResults still pending (`[]` = all arrived); `fs` may mix clients and
+  `timeout` is one common deadline. Clients are waited sequentially, no
+  threads: with a common deadline the outcome is the same. `step` is the
+  polling period of the dead-queue check, not a wait. `retry_dead` resends a
+  request at most once, only if created with `retry=True`, to a queue with
+  alive workers serving the method or else to the same queue. The old FIFO
+  "looks lost" heuristic was removed on purpose: it misfires with several
+  workers on one queue.
 - **Ids.** Request ids are `{client_id}:{n}`; a client id may contain `:`, so
   the responses queue is derived by splitting on the last one.
   `clean_namespace` resets the counters.

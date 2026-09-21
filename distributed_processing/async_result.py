@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import logging
+import random
 from datetime import datetime
 from time import time
 from typing import Any
 
+from .connector import DEFAULT_HEARTBEAT_MAX_AGE
 from .exceptions import RemoteException
 
 logger = logging.getLogger(__name__)
@@ -197,27 +199,28 @@ class AsyncResult:
             return default
 
     def retry(self, queue: str | None = None) -> bool:
-        """Retries the request linked to the AsyncResult instance.
+        """Retry the request associated with this AsyncResult.
 
-        Only retries if the request is pending.
+        Retries only if the request is still pending. The request must have
+        been created with retry=True.
 
         Args:
             queue (str, optional): Queue to resend the request to. Defaults to
                 None, which means the queue of the original request. If given,
-                used as is (the registry is not consulted); see
+                it is used as is (the registry is not consulted); see
                 `Client.rpc_async` for the rules.
 
         Returns:
-            bool: True if the request has been retried, False if not (request already received).
+            bool: True if the request was retried, False otherwise (the request
+                had already been received).
 
         Raises:
-            ValueError: If the AsyncResult was created without retry info
-                (see `Client.rpc_async(retry=True)`).
-
+            ValueError: If the request was created without retry=True (see
+                `Client.rpc_async`).
         """
         if self.request is None:
             raise ValueError(
-                "AsyncResult.retry(): request info is None. Can not retry."
+                "AsyncResult.retry(): no retry information available. The request must be created with retry=True."
             )
         if self.pending():
             if queue is None:
@@ -240,107 +243,118 @@ class AsyncResult:
             return False
 
 
+# Implementation notes.
+#
+# The AsyncResults are re-filtered with `pending()` on every iteration, and
+# only the pending ids go to `Client.wait_responses`. An AsyncResult that
+# has already synced its value (with `clean=True`, the default) is no longer
+# in the client's `responses` nor `pending` caches, and `wait_responses`
+# raises ValueError for such an id.
+#
+# The clients are waited one after another, not in threads. With a common
+# deadline the result is the same: if client A uses up the time, client B
+# gets a timeout of ~0 and `wait_responses` still drains its queue with
+# `pop_all` before returning. Responses stay in each client's queue while
+# another client is being waited on. Threads would only add an executor
+# and cross-thread exceptions.
+#
+# `step` bounds each `wait_responses` call so that the loop wakes up and
+# can run the dead-queue check; without `retry_dead` it only changes how
+# many iterations happen, not the outcome.
+#
+# A request is resent at most once (`retries > 0` is skipped). "No alive
+# worker" is read from `Client.alive_workers`: a queue missing from the
+# registry (pruned, or never registered) or present with an empty list. A
+# queue added with `register=False` therefore always looks dead: its
+# request is resent once to the same queue. Resending a request that was
+# still in the queue duplicates it if a worker comes back, hence the
+# idempotency note in the docstring.
 def gather(
     fs: list,
     timeout: float | None = None,
-    step: float = 5,
-    max_dt: float = 30,
-) -> bool:
-    """Gathers all AsyncResults in the list.
+    step: float = 5.0,
+    retry_dead: bool = False,
+    max_age: float = DEFAULT_HEARTBEAT_MAX_AGE,
+) -> list:
+    """Waits for the responses of a list of AsyncResults.
 
-    Assumes all requests were sent by the same client. If no progress is
-    made for a while (relative to the longest observed execution time),
-    requests that look lost are retried once (only those created with
-    retry info, see `Client.rpc_async(retry=True)`).
+    The AsyncResults may come from different `Client` instances. The wait
+    is a loop: every `step` seconds the pending ones are checked and, with
+    `retry_dead=True`, the requests stuck in a queue without alive workers
+    are resent.
 
     Args:
-        fs (list): List of AsyncResult objects.
-        timeout (int, float, optional): Timeout in seconds. Maximum waiting time.
-            Defaults to None. If None, unlimited waiting time.
-        step (int, float): Step time in seconds. Defaults to 5 secs.
-        max_dt (int, float): Max delta time to retry a request.
+        fs (list): AsyncResult objects, possibly from different clients.
+        timeout (float, optional): Total waiting time in seconds, shared by
+            all the clients: it does not add up per client. Defaults to
+            None, which waits until every response has arrived.
+        step (float): Seconds each call to `Client.wait_responses` blocks
+            before control returns to this loop. It is the polling period
+            of the dead-queue check, not a waiting time: with
+            `retry_dead=False` it does not change the result. With N
+            clients one iteration lasts up to N * step. Defaults to 5.
+        retry_dead (bool): If True, a pending request whose queue has no
+            alive worker (see `Client.alive_workers`) is resent once with
+            `AsyncResult.retry`: to a queue with alive workers that serves
+            the method if there is one, otherwise to the same queue. Only
+            requests created with `retry=True` can be resent. If the
+            request was still in the queue and a worker comes back, it
+            runs twice, so the function must be idempotent. A queue added
+            with `register=False` is not in the registry and always looks
+            dead. Defaults to False.
+        max_age (float): Seconds without a heartbeat after which a worker
+            counts as dead, passed to `Client.alive_workers`. Workers
+            without heartbeats count as alive. Defaults to
+            `DEFAULT_HEARTBEAT_MAX_AGE` (30 s).
 
     Returns:
-        bool: True if all responses were received, False if timeout.
+        list: The AsyncResults still pending when the wait ends. [] means
+            every response arrived. Use `AsyncResult.get` or `safe_get` on
+            `fs` to read the values.
+
+    Examples:
+        fs = [c1.rpc_async("add", [1, 2], retry=True), c2.rpc_async("add", [3, 4], retry=True)]
+        gather(fs, timeout=60)                       # [] if both arrived in time
+        gather(fs, timeout=60, retry_dead=True)      # resend what sits on a dead queue
+        [f.get() for f in fs]
+
     """
+    deadline = None if timeout is None else time() + timeout
+    while True:
+        pending = [f for f in fs if f.pending()]
+        if not pending:
+            return []
+        if retry_dead:
+            _retry_on_dead_queues(pending, max_age)
+        if deadline is not None and time() >= deadline:
+            return pending
 
-    def ar_indices_to_retry(fs):
-        # Queues are FIFO: if a request older than the last completed one
-        # in the same queue is still pending, it was probably lost.
-        by_queue = {}
-        for i, f in enumerate(fs):
-            by_queue.setdefault(f.queue, []).append((i, f.done()))
+        ids_by_client: dict = {}
+        for f in pending:
+            ids_by_client.setdefault(f._client, []).append(f.id)
+        for client, ids in ids_by_client.items():
+            wait = step if deadline is None else max(0.0, min(step, deadline - time()))
+            client.wait_responses(ids, timeout=wait)
 
-        indices = []
-        for entries in by_queue.values():
-            last_done = -1
-            for pos, (_, done) in enumerate(entries):
-                if done:
-                    last_done = pos
-            for i, done in entries[: last_done + 1]:
-                if not done:
-                    indices.append(i)
 
-        return indices
+def _retry_on_dead_queues(pending: list, max_age: float) -> None:
+    "Resends, once, the pending requests whose queue has no alive worker."
+    by_client: dict = {}
+    for f in pending:
+        by_client.setdefault(f._client, []).append(f)
 
-    _ = [f.status for f in fs]
-    # AsyncResults sorted by creation_time
-    fs = sorted(fs, key=lambda f: f.creation_time)
-
-    N = len(fs)
-    t_0 = time()
-    last_progress = t_0
-    i = 0
-    N_pending = N
-    max_dt_real = max_dt
-    retried = set()
-    while timeout is None or (time() - t_0) <= timeout:
-        pending_ars = [ar for ar in fs if not ar.done()]
-        pending_ids = [ar.id for ar in pending_ars]
-
-        if len(pending_ars) == 0:
-            return True
-
-        if len(pending_ars) < N_pending:
-            N_pending = len(pending_ars)
-            last_progress = time()
-
-        dts = [
-            f.metadata["timing"]["execution_finish"]
-            - f.metadata["timing"]["execution_start"]
-            for f in fs
-            if f.done()
-            and "execution_start" in f.metadata.get("timing", {})
-            and "execution_finish" in f.metadata.get("timing", {})
-        ]
-
-        if len(dts) > 0:
-            max_dt_real = max(max(dts), max_dt)
-
-        if (time() - last_progress) > 2 * max_dt_real:
-            for ix in ar_indices_to_retry(fs):
-                if ix not in retried and fs[ix].request is not None:
-                    fs[ix].retry()
-                    retried.add(ix)
-                    logger.debug(f"Retrying request with id: {fs[ix].id}")
+    for client, ars in by_client.items():
+        alive = client.alive_workers(max_age)  # refreshes the registry cache too
+        for f in ars:
+            if f.request is None or f.retries > 0 or alive.get(f.queue):
+                continue
+            method = f.request[0]
+            live_queues = [
+                q for q in client.all_queues_for_method(method) if alive.get(q)
+            ]
+            target = random.choice(live_queues) if live_queues else None
             logger.warning(
-                "gather: no progress for a while. It looks like there are no workers on the other side."
+                f"{timestamp()} gather: queue {f.queue} has no alive worker. "
+                f"Retrying request {f.id} on queue {target or f.queue}."
             )
-
-        logger.debug(
-            f"{i}: seconds {time() - t_0}s, AR recovered {N - N_pending}, AR left {N_pending}, max delta {max_dt_real}"
-        )
-
-        try:
-            if (
-                fs[0]._client.wait_responses(pending_ids, timeout=step) == []
-            ):  # assumes all requests were sent by the same client
-                return True
-        except TimeoutError:
-            pass
-
-        _ = [f.status for f in fs]
-
-        i += 1
-
-    return False
+            f.retry(queue=target)
