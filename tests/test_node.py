@@ -1,4 +1,4 @@
-"""Tests of `distributed_processing.utils.node`.
+"""Tests of `distributed_processing.node`.
 
 The master runs in this process on a `MemoryConnector`. Each worker
 subprocess builds its own `Worker` on its own `MemoryConnector`, so the
@@ -13,7 +13,7 @@ import pytest
 from conftest import MemoryConnector, add
 
 from distributed_processing.client import serialize_python_call
-from distributed_processing.utils import node
+from distributed_processing.node import node
 from distributed_processing.worker import Worker
 
 
@@ -134,7 +134,7 @@ class TestSubprocesses:
 
 class TestDynamicTypes:
     def test_import_path_is_resolved_in_the_child(self, master):
-        path = "test_utils:make_worker"
+        path = "test_node:make_worker"
         pid, worker_type, worker_id = call(master, "create_worker", path, ["q5"])
         assert worker_type == path
         assert call(master, "list_processes") == [(pid, path, worker_id)]
@@ -154,7 +154,7 @@ class TestDynamicTypes:
         m = Worker(
             Spy(MemoryConnector()), worker_id="node_remote", heartbeat_interval=None
         )
-        with caplog.at_level("WARNING", logger="distributed_processing.utils"):
+        with caplog.at_level("WARNING", logger="distributed_processing.node"):
             node(m, {}, creation_processes_timeout=30, allow_remote_constructors=True)
         assert any("create_worker_fn" in msg for msg in caplog.messages)
         try:

@@ -35,9 +35,9 @@ def timestamp() -> str:
 # refers to (a constant, an imported class), and the worker raises
 # `NameError` when it runs it. With `recurse=True` dill pickles the globals
 # the function actually uses: values by value, imported modules and
-# classes by reference. `utils` sets the same option in `dill.settings`,
-# so before this the outcome depended on whether `utils` had been
-# imported first.
+# classes by reference. `node` sets the same option in `dill.settings`,
+# so before this the outcome depended on whether `node` (or `utils`) had
+# been imported first.
 #
 # dill.dumps returns bytes, and the params of a request travel through the
 # connector's serializer like any other message. The default serializer on

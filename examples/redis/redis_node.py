@@ -1,5 +1,5 @@
 """A node on Redis: a master worker that starts, lists and kills worker
-subprocesses on request (see `distributed_processing.utils.node`).
+subprocesses on request (see `distributed_processing.node`).
 
 Run it in a terminal and drive it from `redis_client_node.py`:
 

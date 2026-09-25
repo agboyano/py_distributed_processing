@@ -25,10 +25,11 @@ pluggable **connector**: Redis or a shared directory (`fs_structs`).
   atomicity.
 - `distributed_processing/redis_connector.py`, `filesystem_connector.py`: the
   two transports. `serializers.py`: `JsonSerializer` (Redis default),
-  `PickleSerializer`, `JoblibSerializer`. `utils.py`: `fsclient`, `fsworker`
-  helpers for the filesystem transport; `node` (a master `Worker` that
-  starts, lists and kills worker subprocesses via RPC, any connector) with
-  `fsnode` and `redisnode` on top. Connectors are imported lazily there.
+  `PickleSerializer`, `JoblibSerializer`. `node.py`: `node`, a master
+  `Worker` that starts, lists and kills worker subprocesses via RPC, on any
+  connector. `utils.py`: one-line constructors per transport (`fsclient`,
+  `fsworker`, `fsnode`, `redisnode`; connectors imported lazily) and
+  re-exports of `node`, `serialize`, `deserialize`.
 - `tests/`: pytest. Unit tests run on `tests/conftest.py:MemoryConnector`, the
   smallest complete connector. `tests/test_connector.py` is the contract
   suite and runs against memory, filesystem (marker `integration`) and a fake
@@ -147,9 +148,9 @@ variables. Read it first.
   `run_forever` for services (errors are logged and retried with backoff).
   Both start the heartbeat thread; a transport error inside it is logged,
   never raised.
-- **Nodes (`utils.node`).** Worker subprocesses start with the `spawn`
+- **Nodes (`node.node`).** Worker subprocesses start with the `spawn`
   context on every platform (the master has threads; the design must work
-  in a notebook on Windows). The `Process` target is `utils._create_worker`;
+  in a notebook on Windows). The `Process` target is `node._create_worker`;
   the user's constructor, args and kwargs travel as one dill blob and the
   constructor builds the worker **and its connector** in the child. The
   child reports `("ok", worker_id)` or `("error", traceback)` through a
