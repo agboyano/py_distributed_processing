@@ -6,7 +6,6 @@ from datetime import datetime
 from time import time
 from typing import Any
 
-from .connector import DEFAULT_HEARTBEAT_MAX_AGE
 from .exceptions import RemoteException
 
 logger = logging.getLogger(__name__)
@@ -292,35 +291,36 @@ class AsyncResult:
 #    evidence, no matter which client sent it.
 #
 # 5. "A worker took it" is not the same as "it is lost". The request may
-#    be running now in a worker that is alive. We count it as lost only
-#    in two cases. The queue has no alive worker at all. Or the queue has
-#    a registered worker whose heartbeat is too old, and that worker
-#    could have taken the request: the request was sent before the
-#    worker's deadline (its last heartbeat plus its tolerance, see
-#    `Connector.dead_workers`). A worker cannot take a request sent after
-#    its death. This limit matters when an old dead worker stays in the
-#    registry: without it, a slow request on a healthy queue could be
-#    resent.
+#    be running now in a worker that is alive. A worker runs one request
+#    at a time and takes them in FIFO order. So an alive worker that has
+#    answered a request sent later to the same queue cannot be holding
+#    the earlier one: it would have taken and answered the earlier one
+#    first. Each answer carries `metadata.worker`, so we know who
+#    answered what. The request is lost when a later request on its
+#    queue was answered and every alive registered worker on that queue
+#    answered a request sent after it. With no alive worker on the
+#    queue, the second part holds by itself. Dead workers play no part:
+#    the rule does not need them to stay in the registry, so pruning at
+#    any moment is safe.
 #
-# 6. The `lost` flag on the AsyncResult remembers the decision. It is
-#    needed because the request may have to wait for a queue with alive
-#    workers, and because `prune_dead_workers` can remove the dead worker
-#    from the registry in the meantime. `retry` clears the flag. A resent
-#    request needs new evidence, so there is no limit on the number of
-#    resends.
+# 6. The `lost` flag on the AsyncResult remembers the decision, because
+#    the request may have to wait for a queue with alive workers. `retry`
+#    clears the flag. A resent request needs new evidence, so there is
+#    no limit on the number of resends.
 #
 # 7. Two cases cannot be decided from the client. First, the newest
 #    request on a queue: nothing was sent after it, so nothing can prove
-#    that a worker took it. It stays pending. Second, two or more alive
-#    workers on one queue plus a dead one: a long request running in an
-#    alive worker may be resent when another worker answers a later
-#    request. This is why the docstring asks for idempotent functions.
+#    that a worker took it. Second, an alive worker on the queue that
+#    answered nothing sent after the request (idle, slow, or serving
+#    other clients): it may be holding the request. Both stay pending.
+#    A worker added with `register=False` is not in the registry, so it
+#    cannot be excluded: with such workers keep the functions idempotent.
 def gather(
     fs: list,
     timeout: float | None = None,
     step: float = 5.0,
     retry_lost: bool = False,
-    max_age: float = DEFAULT_HEARTBEAT_MAX_AGE,
+    max_age: float | None = None,
 ) -> list:
     """Waits for the responses of a list of AsyncResults.
 
@@ -344,27 +344,28 @@ def gather(
             it died. Two conditions must hold. First, a request sent later
             to the same queue, by any client in `fs`, has been answered:
             queues are FIFO, so the pending request is not in the queue
-            any more. Second, the queue has a registered worker whose
-            heartbeat is too old (see `Connector.dead_workers`) and the
-            request was sent before that worker died, or the queue has no
-            alive worker at all. The request is resent with
+            any more. Second, no alive worker can be holding it: every
+            alive registered worker on that queue (see
+            `Client.alive_workers`) has answered a request sent after it,
+            which a worker that runs one request at a time could not do
+            while holding the earlier one. The request is resent with
             `AsyncResult.retry` to a queue with alive workers that serves
             the method: the same queue if it is alive again, otherwise a
             random one. If no such queue exists, a warning is logged once,
             the AsyncResult gets `lost=True` and it is resent when a later
             step finds a queue. Only requests created with `retry=True`
             are resent; the others get `lost=True` and a log line.
-            A request still in the queue is never resent. The newest
-            request on a queue cannot be checked, because nothing was sent
-            after it: it stays pending. With two or more alive workers on
-            one queue plus a dead one, a long request may be resent while
-            it is still running, so use idempotent functions. Defaults to
+            A request still in the queue is never resent. Two cases stay
+            pending: the newest request on a queue (nothing was sent after
+            it) and a request on a queue where an alive worker answered
+            nothing sent after it (it may be holding it). Defaults to
             False.
-        max_age (float): Seconds without a heartbeat after which a worker
-            counts as dead, or three times its own interval if that is
-            longer (see `Connector.dead_workers`). Workers without
-            heartbeats count as alive. Defaults to
-            `DEFAULT_HEARTBEAT_MAX_AGE` (30 s).
+        max_age (float, optional): Seconds without a heartbeat after which
+            a registered worker no longer counts as alive, or three times
+            its own interval if that is longer (see
+            `Connector.dead_workers`). Workers without heartbeats count as
+            alive. Defaults to None: each client uses its connector's
+            `default_heartbeat_max_age` (30 s; 61 s on the filesystem).
 
     Returns:
         list: The AsyncResults still pending when the wait ends. [] means
@@ -396,33 +397,30 @@ def gather(
             client.wait_responses(ids, timeout=wait)
 
 
-def _last_answered(fs: list) -> dict:
-    "Latest `request_sent` among the answered requests, by queue ref."
+def _answered_by_queue(fs: list) -> dict:
+    "(request_sent, worker_id) of every answered request, by queue ref."
     out: dict = {}
     for f in fs:
         if not f.done():
             continue
-        queue_ref = f.metadata.get("queue")
-        sent = f.metadata.get("timing", {}).get("request_sent")
-        if queue_ref is None or sent is None:
+        m = f.metadata
+        queue_ref, worker = m.get("queue"), m.get("worker")
+        sent = m.get("timing", {}).get("request_sent")
+        if queue_ref is None or worker is None or sent is None:
             continue  # answered by an old worker version, no metadata
-        out[queue_ref] = max(out.get(queue_ref, sent), sent)
+        out.setdefault(queue_ref, []).append((sent, worker))
     return out
 
 
-def _retry_lost_requests(fs: list, pending: list, max_age: float) -> None:
-    "Marks the pending requests that a dead worker took and resends them."
-    answered = _last_answered(fs)
+def _retry_lost_requests(fs: list, pending: list, max_age: float | None) -> None:
+    "Marks the pending requests that no alive worker can hold and resends them."
+    answered = _answered_by_queue(fs)
     by_client: dict = {}
     for f in pending:
         by_client.setdefault(f._client, []).append(f)
 
     for client, ars in by_client.items():
-        alive = client.alive_workers(max_age)  # refreshes the registry cache too
-        registered = client.registry()["workers"]
-        deadlines = client.connector.dead_workers(max_age)
-        # Registered workers with an old heartbeat, by simple queue name.
-        dead = {q: [w for w in ws if w in deadlines] for q, ws in registered.items()}
+        alive = client.alive_workers(max_age)  # refreshes the cache, prunes
 
         for f in ars:
             sent = client.pending.get(f.id)
@@ -431,19 +429,16 @@ def _retry_lost_requests(fs: list, pending: list, max_age: float) -> None:
             newly = False
             if not f.lost:
                 queue_ref = client.connector.get_requests_queue(f.queue)
-                # Step 3 of the notes: a later request was answered.
-                taken = answered.get(queue_ref, float("-inf")) > sent
-                # Step 5: no alive worker, or a dead worker that could
-                # have taken it (sent before its deadline).
-                by_dead = not alive.get(f.queue) or any(
-                    sent <= deadlines[w] for w in dead.get(f.queue, [])
-                )
-                if taken and by_dead:
+                # Steps 3 and 5 of the notes: the workers that answered a
+                # request sent after this one cannot be holding it.
+                later = {w for t, w in answered.get(queue_ref, []) if t > sent}
+                holders = [w for w in alive.get(f.queue, []) if w not in later]
+                if later and not holders:
                     f.lost = newly = True
                     logger.warning(
-                        f"{timestamp()} gather: request {f.id} is lost. A worker "
-                        f"took it from queue {f.queue} and died (dead workers: "
-                        f"{dead.get(f.queue, [])}). A later request was answered."
+                        f"{timestamp()} gather: request {f.id} is lost. A later "
+                        f"request on queue {f.queue} was answered and no alive "
+                        f"worker can be holding it (alive: {alive.get(f.queue, [])})."
                     )
             if not f.lost:
                 continue

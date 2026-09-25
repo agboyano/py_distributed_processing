@@ -67,11 +67,22 @@ class FileSystemConnector(Connector):
         lock_registry_max_age (float): A registry lock older than this many
             seconds is treated as left by a dead process and broken. Use
             minutes, not seconds, and keep the machine clocks in sync.
+        default_heartbeat_interval (float): 30 s between heartbeats for a
+            `Worker` created without `heartbeat_interval`.
+        default_heartbeat_max_age (float): 61 s, the `max_age` used when a
+            caller leaves it unset.
 
     """
 
     sep = "_"
     id_prefix = "fs"
+
+    # A shared drive is slow and every heartbeat is a file write, so the
+    # worker beats every 30 s. A worker that publishes that interval gets
+    # 3 * 30 = 90 s of tolerance from `dead_workers`; 61 s is the floor,
+    # for clock skew and for workers that publish no interval.
+    default_heartbeat_interval = 30.0
+    default_heartbeat_max_age = 61.0
 
     def __init__(
         self,

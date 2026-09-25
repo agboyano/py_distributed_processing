@@ -286,6 +286,31 @@ class TestHeartbeats:
         assert connector.prune_dead_workers(max_age=0.1) == ["w2"]
         assert connector.workers_registry() == {q1: ["w1"]}
 
+
+class TestHeartbeatDefaults:
+    def test_defaults_are_class_attributes_of_the_transport(self):
+        assert MemoryConnector.default_heartbeat_interval == 10
+        assert MemoryConnector.default_heartbeat_max_age == 30
+        pytest.importorskip("fs_structs")
+        from distributed_processing.filesystem_connector import FileSystemConnector
+
+        assert FileSystemConnector.default_heartbeat_interval == 30
+        assert FileSystemConnector.default_heartbeat_max_age == 61
+
+    def test_unset_max_age_uses_the_connector_default(self):
+        class Quick(MemoryConnector):
+            default_heartbeat_max_age = 0.1
+
+        c = Quick()
+        register_two_workers(c)  # w1 and w2
+        c.heartbeat("w1")
+        time.sleep(0.2)
+        c.heartbeat("w2")
+
+        assert set(c.dead_workers()) == {"w1"}
+        assert c.alive_workers() == {"w2"}
+        assert c.prune_dead_workers() == ["w1"]
+
     def test_heartbeats_are_not_variables(self, connector):
         connector.heartbeat("w1")
         connector.set_variable("w1", "a variable, not a heartbeat")

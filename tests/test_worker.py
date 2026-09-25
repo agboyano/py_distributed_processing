@@ -298,6 +298,38 @@ class HeartbeatFailsAfterFirst:
         return getattr(self._connector, name)
 
 
+class Outage:
+    """Wraps a connector: `heartbeat` and `register_methods` fail while `down`."""
+
+    def __init__(self, connector):
+        self._connector = connector
+        self.down = False
+        self.registrations = 0
+
+    def heartbeat(self, worker_id, interval=None):
+        if self.down:
+            raise OSError("drive down")
+        self._connector.heartbeat(worker_id, interval)
+
+    def register_methods(self, queues, worker_id):
+        if self.down:
+            raise OSError("drive down")
+        self.registrations += 1
+        self._connector.register_methods(queues, worker_id)
+
+    def __getattr__(self, name):
+        return getattr(self._connector, name)
+
+
+def wait_until(condition, timeout=1.0):
+    deadline = time.time() + timeout
+    while not condition():
+        if time.time() > deadline:
+            return False
+        time.sleep(0.01)
+    return True
+
+
 class TestHeartbeat:
     def test_run_beats_while_running_and_keeps_the_last_beat_on_return(self, connector):
         w = Worker(connector, heartbeat_interval=0.05)
@@ -379,6 +411,71 @@ class TestHeartbeat:
         assert w.worker_id not in connector.heartbeats()
         assert not thread.is_alive()
         w.stop_heartbeat()  # idempotent
+
+    def test_interval_defaults_to_the_connector(self, connector):
+        assert Worker(connector).heartbeat_interval == 10
+        assert Worker(connector, heartbeat_interval=None).heartbeat_interval is None
+
+        class Quick(type(connector)):
+            default_heartbeat_interval = 0.05
+
+        quick = Quick()
+        w = Worker(quick)
+        w.add_requests_queue("q", {"add": add})
+        w.run(timeout=0.15)
+        assert quick.heartbeat_intervals()[w.worker_id] == 0.05
+
+    def test_worker_re_registers_after_an_outage(self, connector, caplog):
+        outage = Outage(connector)
+        w = Worker(outage, heartbeat_interval=0.05)
+        w.add_requests_queue("q2", {"add": add})
+        w.update_methods_registry()
+        q2 = connector.get_requests_queue("q2")
+        t = threading.Thread(target=w.run, kwargs={"timeout": 2}, daemon=True)
+        t.start()
+        time.sleep(0.1)
+
+        outage.down = True  # beats fail; the last good one goes stale
+        time.sleep(0.25)
+        assert connector.prune_dead_workers(max_age=0.1) == [w.worker_id]
+        assert connector.workers_registry() == {}
+
+        with caplog.at_level("INFO", logger="distributed_processing.worker"):
+            outage.down = False
+            assert wait_until(lambda: q2 in connector.workers_registry())
+        assert connector.workers_registry()[q2] == [w.worker_id]
+        assert connector.methods_registry()["add"] == [q2]
+        assert w.worker_id in connector.alive_workers(max_age=0.1)
+        assert outage.registrations == 2  # the explicit one and one recovery
+        assert any("re-registered after" in m for m in caplog.messages)
+        w.close()
+        t.join(timeout=5)
+
+    def test_heartbeat_on_time_never_writes_the_registry(self, connector):
+        outage = Outage(connector)
+        w = Worker(outage, heartbeat_interval=0.05)
+        w.add_requests_queue("q2", {"add": add})
+        w.update_methods_registry()
+        w.run(timeout=0.3)
+        assert outage.registrations == 1
+        w.close()
+
+    def test_private_worker_is_not_registered_after_a_gap(self, connector):
+        outage = Outage(connector)
+        w = Worker(outage, heartbeat_interval=0.05)
+        w.add_requests_queue("q2", {"add": add})  # update_methods_registry never called
+        t = threading.Thread(target=w.run, kwargs={"timeout": 1}, daemon=True)
+        t.start()
+        time.sleep(0.1)
+        outage.down = True
+        time.sleep(0.2)
+        outage.down = False
+        time.sleep(0.15)
+
+        assert connector.workers_registry() == {}
+        assert outage.registrations == 0
+        w.close()
+        t.join(timeout=5)
 
     def test_heartbeat_failure_is_logged_not_raised(self, connector, caplog):
         flaky = HeartbeatFailsAfterFirst(connector)

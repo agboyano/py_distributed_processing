@@ -46,10 +46,10 @@ HEARTBEAT_INTERVALS = "heartbeat_intervals"
 # machines do not count.
 HEARTBEAT_TOLERANCE = 3
 
-# Seconds without a heartbeat after which a worker is considered dead.
-# It is the floor: a worker that publishes a longer interval gets
-# `HEARTBEAT_TOLERANCE` times its interval instead. Three times the default
-# `Worker.heartbeat_interval` (10 s).
+# Seconds without a heartbeat after which a worker is considered dead,
+# base value of `Connector.default_heartbeat_max_age`. It is the floor: a
+# worker that publishes a longer interval gets `HEARTBEAT_TOLERANCE` times
+# its interval instead. Three times the default heartbeat interval (10 s).
 DEFAULT_HEARTBEAT_MAX_AGE = 30.0
 
 # Sentinel for "no default given" in `update_variable`, so that an explicit
@@ -140,7 +140,10 @@ class Connector(ABC):
         `EXPIRE`) is used, so the rule is the same on every transport.
         Clocks of the machines are assumed to agree within a few seconds;
         `max_age` is the floor that absorbs that skew and covers workers
-        that do not publish their interval.
+        that do not publish their interval. A `max_age` left unset is
+        `default_heartbeat_max_age`, and a `Worker` without
+        `heartbeat_interval` beats every `default_heartbeat_interval`
+        seconds: both are class attributes a transport may override.
 
     Atomicity
         Every public registry operation runs inside `_registry_lock()`.
@@ -163,11 +166,26 @@ class Connector(ABC):
         sep (str): Separator used to build keys and queue references.
         id_prefix (str): Prefix of client and worker ids
             (`{id_prefix}_client`, `{id_prefix}_server`).
+        default_heartbeat_interval (float): Seconds between heartbeats of a
+            `Worker` created without `heartbeat_interval`. 10 s.
+        default_heartbeat_max_age (float): `max_age` used when a caller
+            leaves it unset (`dead_workers`, `alive_workers`,
+            `prune_dead_workers`, their `Client` versions and `gather`).
+            30 s.
 
     """
 
     sep: str = "_"
     id_prefix: str = "connector"
+
+    # Heartbeat defaults live on the connector because they depend on the
+    # transport, not on the code: a shared drive is slower than Redis and
+    # every beat is a file write. A worker and a client on the same
+    # transport then agree without any configuration. A transport
+    # overrides both when its latency asks for it (see
+    # `FileSystemConnector`).
+    default_heartbeat_interval: float = 10.0
+    default_heartbeat_max_age: float = DEFAULT_HEARTBEAT_MAX_AGE
 
     # ---- primitives every transport implements ------------------------------
 
@@ -543,7 +561,7 @@ class Connector(ABC):
         """
         return self._values_by_worker(HEARTBEAT_INTERVALS)
 
-    def dead_workers(self, max_age: float = DEFAULT_HEARTBEAT_MAX_AGE) -> dict:
+    def dead_workers(self, max_age: float | None = None) -> dict:
         """Returns the workers whose heartbeat is too old, with their deadline.
 
         The deadline of a worker is its last heartbeat plus its tolerance.
@@ -553,14 +571,17 @@ class Connector(ABC):
         key are never in the result.
 
         Args:
-            max_age (float): Seconds. The floor of the tolerance. Defaults
-                to `DEFAULT_HEARTBEAT_MAX_AGE` (30 s).
+            max_age (float, optional): Seconds. The floor of the tolerance.
+                Defaults to None: the connector's
+                `default_heartbeat_max_age` (30 s; 61 s on the filesystem).
 
         Returns:
             dict: `{worker_id: deadline}`, with `deadline` as a
                 `time.time()` value.
 
         """
+        if max_age is None:
+            max_age = self.default_heartbeat_max_age
         now = time.time()
         intervals = self.heartbeat_intervals()
         out = {}
@@ -570,13 +591,13 @@ class Connector(ABC):
                 out[worker_id] = beat + tolerance
         return out
 
-    def alive_workers(self, max_age: float = DEFAULT_HEARTBEAT_MAX_AGE) -> set:
+    def alive_workers(self, max_age: float | None = None) -> set:
         """Returns the ids of the workers with a recent heartbeat.
 
         Args:
-            max_age (float): Seconds. The floor of the tolerance, see
-                `dead_workers`. Defaults to `DEFAULT_HEARTBEAT_MAX_AGE`
-                (30 s).
+            max_age (float, optional): Seconds. The floor of the tolerance,
+                see `dead_workers`. Defaults to None: the connector's
+                `default_heartbeat_max_age`.
 
         Returns:
             set: Worker ids with a heartbeat that is not too old. Workers
@@ -592,7 +613,7 @@ class Connector(ABC):
         self._value_delete(self._key(HEARTBEAT_INTERVALS, worker_id))
         return existed
 
-    def prune_dead_workers(self, max_age: float = DEFAULT_HEARTBEAT_MAX_AGE) -> list:
+    def prune_dead_workers(self, max_age: float | None = None) -> list:
         """Unregisters the workers whose heartbeat is too old.
 
         Only workers **with** a stale heartbeat key are pruned: a worker
@@ -601,9 +622,9 @@ class Connector(ABC):
         they are. The heartbeat keys of each pruned worker are deleted too.
 
         Args:
-            max_age (float): Seconds. The floor of the tolerance, see
-                `dead_workers`. Defaults to `DEFAULT_HEARTBEAT_MAX_AGE`
-                (30 s).
+            max_age (float, optional): Seconds. The floor of the tolerance,
+                see `dead_workers`. Defaults to None: the connector's
+                `default_heartbeat_max_age`.
 
         Returns:
             list: Sorted ids of the pruned workers.

@@ -95,10 +95,13 @@ class Worker:
             None (derive the response queue from the request `id`).
         heartbeat_interval (float, optional): Seconds between heartbeats
             while `run` or `run_forever` is running (see `start_heartbeat`).
-            Defaults to 10. None disables heartbeats. The interval is sent
-            with each heartbeat: a client counts the worker dead after
-            three missed beats, or after its `max_age` (30 s by default)
-            if that is longer.
+            Defaults to the connector's `default_heartbeat_interval` (10 s;
+            30 s on the filesystem). None disables heartbeats. The interval
+            is sent with each heartbeat: a client counts the worker dead
+            after three missed beats, or after its `max_age` if that is
+            longer. After two missed beats (channel down, machine asleep)
+            the worker publishes its queues and methods again at its next
+            beat, in case a client pruned it.
 
     """
 
@@ -108,11 +111,15 @@ class Worker:
         worker_id: str | None = None,
         with_trace: bool = True,
         reply_to_default: str | None = None,
-        heartbeat_interval: float | None = 10.0,
+        heartbeat_interval: float | None = MISSING,
     ):
         self.connector = connector
+        if heartbeat_interval is MISSING:
+            heartbeat_interval = connector.default_heartbeat_interval
         self.heartbeat_interval = heartbeat_interval
         self._heartbeat_thread: threading.Thread | None = None
+        self._last_beat: float | None = None  # time() of the last good beat
+        self._registered = False  # update_methods_registry was called
         self._heartbeat_stop = threading.Event()
 
         # Insertion order defines queue priority (dicts respect key
@@ -319,13 +326,22 @@ class Worker:
         return self.connector.variables()
 
     def update_methods_registry(self) -> None:
-        "Publishes the queues and methods added with `register=True`."
+        """Publishes the queues and methods added with `register=True`.
+
+        Call it once, after adding the queues. From then on the heartbeat
+        thread publishes them again only after a gap of two intervals
+        without a successful heartbeat (channel down, machine asleep),
+        because a client may have pruned the worker in the meantime.
+        """
+        self._registered = True
+        self._register()
+
+    def _register(self) -> None:
         queues_to_register = {
             k: v[0]
             for (k, v) in self.requests_queues.items()
             if k in self.queues_to_register
         }
-
         self.connector.register_methods(queues_to_register, self.worker_id)
 
     # Implementation notes.
@@ -358,13 +374,37 @@ class Worker:
     # stay in the registry with no heartbeat, which means "alive" forever
     # and impossible to prune. With the last beat left in place, it goes
     # stale and `prune_dead_workers` removes it.
+    #
+    # A client prunes a worker whose last heartbeat is too old. That can
+    # happen to a live worker: the shared drive was down for a while and
+    # its beats failed, or the machine slept. The worker registers only
+    # once, so after such a prune it would be out of the routing until a
+    # restart. The fix must not cost anything in normal operation: a
+    # registry write takes the registry lock and, on a shared drive, file
+    # writes, and the worker must stay fast. So the worker does not
+    # re-register on every beat. It can tell by itself when a prune may
+    # have happened: a client prunes only after three missed beats at
+    # least (`HEARTBEAT_TOLERANCE`), and the worker knows the time of its
+    # last good beat (`_last_beat`). Before a beat, if that time is two
+    # intervals old or more, `_beat` publishes the queues and methods once
+    # and then beats. Two intervals instead of three leaves room for clock
+    # skew. Registration goes first, so a client that sees the fresh beat
+    # also sees the registry entry. A failed attempt is logged and tried
+    # again at the next interval; `_last_beat` only moves after a good
+    # beat, so the gap keeps growing until one succeeds. A worker that
+    # never called `update_methods_registry` stays private. Not covered:
+    # `clean_namespace` (restart the workers) and an old client pruning
+    # with a plain `max_age` shorter than the interval (no gap here).
     def start_heartbeat(self) -> None:
         """Starts the heartbeat thread. Idempotent; no-op if disabled.
 
         Writes one heartbeat immediately and then one every
         `heartbeat_interval` seconds until `stop_heartbeat`. Each heartbeat
-        also publishes the interval. `run` and `run_forever` call it for
-        you; call it yourself only if you drive the worker with `run_once`.
+        also publishes the interval. After two intervals without a good
+        heartbeat, the next one also publishes the queues and methods
+        again (see `update_methods_registry`). `run` and `run_forever`
+        call it for you; call it yourself only if you drive the worker
+        with `run_once`.
         """
         if self.heartbeat_interval is None:
             return
@@ -372,12 +412,12 @@ class Worker:
             return
 
         self._heartbeat_stop.clear()
-        self.connector.heartbeat(self.worker_id, self.heartbeat_interval)
+        self._beat()
 
         def beat():
             while not self._heartbeat_stop.wait(self.heartbeat_interval):
                 try:
-                    self.connector.heartbeat(self.worker_id, self.heartbeat_interval)
+                    self._beat()
                 except Exception:
                     logger.exception(
                         f"{timestamp()} Worker: {self.worker_id} heartbeat failed."
@@ -387,6 +427,19 @@ class Worker:
             target=beat, name=f"heartbeat-{self.worker_id}", daemon=True
         )
         self._heartbeat_thread.start()
+
+    def _beat(self) -> None:
+        "One heartbeat; re-registers first after a gap of two intervals."
+        now = time()
+        gap = None if self._last_beat is None else now - self._last_beat
+        if self._registered and gap is not None and gap >= 2 * self.heartbeat_interval:
+            self._register()
+            logger.info(
+                f"{timestamp()} Worker: {self.worker_id} re-registered after "
+                f"{gap:.0f} s without heartbeat."
+            )
+        self.connector.heartbeat(self.worker_id, self.heartbeat_interval)
+        self._last_beat = time()
 
     def stop_heartbeat(self) -> None:
         """Stops the heartbeat thread. Idempotent.
@@ -400,10 +453,12 @@ class Worker:
         if thread is not None:
             thread.join(timeout=5)
             self._heartbeat_thread = None
+        self._last_beat = None  # idle time between runs is not a gap
 
     def unregister(self) -> None:
         "Removes the worker's queues and methods from the public registry."
         logger.debug(f"{timestamp()} Worker: {self.worker_id} unregistering.")
+        self._registered = False
         self.connector.unregister_methods(self.worker_id)
 
     def close(self) -> None:

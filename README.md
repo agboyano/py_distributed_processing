@@ -188,7 +188,8 @@ worker that is busy with a long task.
 
 While `run` or `run_forever` is running, a daemon thread writes the worker's
 `time.time()` and its `heartbeat_interval` every `heartbeat_interval` seconds
-(10 by default, `Worker(..., heartbeat_interval=None)` disables it). The
+(the connector's `default_heartbeat_interval`: 10 s on Redis, 30 s on the
+filesystem; `Worker(..., heartbeat_interval=None)` disables it). The
 thread beats even while a registered function runs for minutes, which the
 main loop could not do. `close()` and a `with` block delete the heartbeat and
 unregister the worker, so a clean shutdown disappears at once. The end of
@@ -196,8 +197,16 @@ unregister the worker, so a clean shutdown disappears at once. The end of
 Ctrl-C keeps its last heartbeat, goes stale, and `prune_dead_workers()` can
 remove it. A dead worker leaves a stale heartbeat too.
 
+A live worker can be pruned too: the shared drive was down for a while and
+its beats failed, or the machine slept. A worker that could not beat for two
+intervals publishes its queues and methods again at its next beat, because a
+client may have pruned it, and it is back in the routing at once. On time, a
+beat is one write to the value store and the registry is not touched.
+`clean_namespace()` is different: it is an explicit reset, restart the
+workers after it.
+
 ```python
-client.alive_workers()                  # {'my_queue': ['redis_server:3']}, 30 s by default
+client.alive_workers()                  # {'my_queue': ['redis_server:3']}, connector's default max_age
 client.alive_workers(max_age=60)        # tolerate slower heartbeats
 client.prune_dead_workers()             # unregister stale workers, returns their ids
 ```
@@ -205,8 +214,10 @@ client.prune_dead_workers()             # unregister stale workers, returns thei
 Rules:
 
 - A worker is dead when its heartbeat is older than its tolerance, measured
-  with the reader's clock. The tolerance is `max_age` (30 s by default) or
-  three times the worker's own `heartbeat_interval`, whichever is longer.
+  with the reader's clock. The tolerance is `max_age` (the connector's
+  `default_heartbeat_max_age` when unset: 30 s on Redis, 61 s on the
+  filesystem) or three times the worker's own `heartbeat_interval`,
+  whichever is longer.
   So a worker that beats every 60 s is dead after 180 s, whatever the
   reader's `max_age`. `max_age` is the floor: it absorbs a few seconds of
   clock skew and covers workers of older versions that do not publish
@@ -215,11 +226,16 @@ Rules:
 - A registered worker **without** a heartbeat (older version, heartbeats
   disabled, driven with `run_once` only) counts as alive and is never pruned.
   A dead worker always has one: it wrote heartbeats while alive.
-- Nothing prunes automatically. Queue selection does not look at heartbeats
-  and a cache refresh does not prune: the right `max_age` depends on the
-  deployment, and a wrong automatic prune would remove a healthy worker,
-  which never registers again. Call `prune_dead_workers()` when you want
-  dead queues out of the way.
+- Every registry cache refresh prunes the workers that are dead for the
+  connector's default `max_age`: `update_registry_cache()`,
+  `registry(update=True)`, `alive_workers(update=True)`, a cache miss in
+  `cache` mode and each `gather` step. Queue selection in `always` mode
+  reads the connector directly and does not prune. Call
+  `prune_dead_workers(max_age)` for another threshold, or
+  `update_registry_cache(prune=False)` to only read. Pruning is safe
+  because each worker gets its own tolerance, because a live worker pruned
+  while it could not beat comes back by itself, and because `gather` does
+  not need dead entries (see below).
 - Heartbeats are stored in the value store, in their own key families
   (`{namespace}:heartbeats:{worker_id}` and
   `{namespace}:heartbeat_intervals:{worker_id}` on Redis, `heartbeats_...`
@@ -244,11 +260,13 @@ be resent, because it would run twice. Every `step` seconds (5 by default)
 - A worker took it. Queues are FIFO, so if a request sent later to the same
   queue has been answered, the pending request is no longer in the queue.
   The answers of every client in the call count as evidence.
-- That worker died. The queue has a registered worker whose heartbeat is
-  older than `max_age`, and the request was sent before that worker died
-  (before its last heartbeat plus `max_age`). Or the queue has no alive
-  worker at all. An old dead entry in the registry cannot cause the resend
-  of a request sent after its death.
+- No alive worker can be holding it. A worker runs one request at a time
+  and takes them in FIFO order, so an alive worker that answered a request
+  sent later to the same queue cannot be holding the earlier one. Each
+  answer says which worker sent it. The request is lost when every alive
+  registered worker on the queue answered a request sent after it; with no
+  alive worker on the queue this holds by itself. Dead workers play no
+  part, so a prune never hides a loss.
 
 The request goes to a queue with alive workers that serves the method: the
 same queue if it is alive again (a new worker), otherwise a random one. If
@@ -258,12 +276,14 @@ requests created with `retry=True` are resent; the others get `lost=True`
 and a log line. There is no limit: a resent request needs new evidence to be
 resent again.
 
-Two cases cannot be decided from the client. The newest request on a queue:
-nothing was sent after it, so nothing can prove that a worker took it, and it
-stays pending. Two or more alive workers on one queue plus a dead one: a long
-request may be resent while it is still running in an alive worker. Use
-idempotent functions. `gather` works across several `Client` instances with
-one common `timeout` and returns the AsyncResults still pending.
+Two cases stay pending. The newest request on a queue: nothing was sent
+after it, so nothing can prove that a worker took it. A queue with an alive
+worker that answered nothing sent after the request (idle, slow, or serving
+other clients): it may be holding it. A worker added with `register=False`
+is not in the registry and cannot be excluded, so keep the functions
+idempotent when you use such workers. `gather` works across several
+`Client` instances with one common `timeout` and returns the AsyncResults
+still pending.
 
 ### Connector contract
 
@@ -303,15 +323,20 @@ only provides a few primitives. The full rules live in the docstring of
   `update_variable(name, fn, default=...)` is the only read-modify-write:
   it holds `_variable_lock(key)`, one lock per variable, and returns the
   new value; `KeyError` if the variable is not set and no default is given.
-- **Heartbeats**, in the value store under their own key family.
-  `heartbeat(worker_id)` stores the writer's `time.time()`;
-  `heartbeats() -> {worker_id: time}`; `alive_workers(max_age) -> set` of
-  ids with a heartbeat at most `max_age` seconds old (reader's clock);
-  `delete_heartbeat(worker_id) -> bool`; `prune_dead_workers(max_age)`
-  unregisters and deletes the workers with a stale heartbeat and returns
-  their ids. Workers without a heartbeat key are never pruned. No transport
-  expiry is used. Implemented once in the base class: a new connector gets
-  them from the value store primitives.
+- **Heartbeats**, in the value store under their own key families.
+  `heartbeat(worker_id, interval=None)` stores the writer's `time.time()`
+  and, if given, the interval; `heartbeats() -> {worker_id: time}`;
+  `heartbeat_intervals() -> {worker_id: seconds}`;
+  `dead_workers(max_age) -> {worker_id: deadline}` holds the rule (dead
+  after the last beat plus `max(max_age, 3 * interval)`);
+  `alive_workers(max_age) -> set`; `delete_heartbeat(worker_id) -> bool`;
+  `prune_dead_workers(max_age)` unregisters and deletes the dead workers
+  and returns their ids. Workers without a heartbeat key are never pruned.
+  `max_age=None` means the class attribute `default_heartbeat_max_age`, and
+  a `Worker` without `heartbeat_interval` uses `default_heartbeat_interval`:
+  a transport overrides both (the filesystem uses 30 s and 61 s). No
+  transport expiry is used. Implemented once in the base class: a new
+  connector gets them from the value store primitives.
 - **Names.** `get_requests_queue(name)` / `requests_queue_name(ref)` round
   trip; `get_responses_queue(client_id)`; `get_reply_to_from_id("{client_id}:{n}")`
   is the responses queue of that client.

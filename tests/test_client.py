@@ -2,7 +2,7 @@ import threading
 import time
 
 import pytest
-from conftest import add
+from conftest import MemoryConnector, add
 
 from distributed_processing.client import Client
 from distributed_processing.exceptions import RemoteException
@@ -85,6 +85,44 @@ class TestHeartbeats:
 
         assert client.alive_workers(max_age=0.1)["q2"] == ["w_slow"]
         assert client.prune_dead_workers(max_age=0.1) == []
+
+    def test_unset_max_age_uses_the_connector_default(self):
+        class Quick(MemoryConnector):
+            default_heartbeat_max_age = 0.1
+
+        connector = Quick()
+        q = connector.get_requests_queue("q")
+        connector.register_methods({q: {"add": add}}, "w_stale")
+        connector.heartbeat("w_stale")
+        client = Client(connector, check_registry="cache")  # cache filled now
+        time.sleep(0.2)
+
+        # Without a refresh nothing is pruned: the cache still lists q.
+        assert client.alive_workers(update=False) == {"q": []}
+        assert client.prune_dead_workers() == ["w_stale"]
+        assert client.alive_workers() == {}
+
+    def test_update_registry_cache_prunes_with_the_connector_default(self):
+        class Quick(MemoryConnector):
+            default_heartbeat_max_age = 0.1
+
+        connector = Quick()
+        q2 = connector.get_requests_queue("q2")
+        connector.register_methods({q2: {"add": add}}, "w_stale")
+        connector.heartbeat("w_stale")
+        client = Client(connector, check_registry="cache")  # fresh: kept
+        assert client.registry()["workers"] == {"q2": ["w_stale"]}
+        time.sleep(0.2)
+
+        assert client.registry(update=True)["workers"] == {}
+        assert connector.heartbeats() == {}
+
+        # prune=False only reads.
+        connector.register_methods({q2: {"add": add}}, "w_stale2")
+        connector.heartbeat("w_stale2")
+        time.sleep(0.2)
+        client.update_registry_cache(prune=False)
+        assert client.registry()["workers"] == {"q2": ["w_stale2"]}
 
     def test_prune_dead_workers_refreshes_the_cache(self, connector, worker, client):
         q2 = connector.get_requests_queue("q2")

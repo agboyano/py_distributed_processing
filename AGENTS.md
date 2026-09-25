@@ -86,38 +86,55 @@ variables. Read it first.
   single place with the rule: dead when the reader's clock is past
   `last_beat + max(max_age, HEARTBEAT_TOLERANCE * interval)`; it returns
   `{worker_id: deadline}` and `alive_workers`, `prune_dead_workers` (both
-  layers) and `gather` use it. `max_age` (default 30 s) is the floor, for
-  clock skew and for workers that publish no interval. The worker beats
+  layers) and `gather` use it. `max_age` is the floor, for clock skew and
+  for workers that publish no interval. Defaults are class attributes of
+  the connector: `default_heartbeat_interval` (10 s; 30 s on the
+  filesystem) for a `Worker` without `heartbeat_interval`, and
+  `default_heartbeat_max_age` (30 s; 61 s on the filesystem) for every
+  `max_age` left as None, `gather` included (each client resolves its
+  own). The worker beats
   from a daemon thread started by `run` / `run_forever` and stopped in
   their `finally`; `run_once` alone never beats. Only `close()` deletes the
   heartbeat (after unregistering): a worker that leaves `run` without
   `close()` (Ctrl-C) keeps its last beat, goes stale and can be pruned. A
   registered worker without a heartbeat key counts as alive and is never
-  pruned (compatibility). Pruning is explicit (`prune_dead_workers`):
-  nothing in queue selection, in `update_registry_cache` or in the worker
-  does it, because the right `max_age` depends on the deployment and a
-  healthy worker pruned by mistake never registers again.
+  pruned (compatibility). The worker registers once
+  (`update_methods_registry` sets `_registered`; `unregister` clears it)
+  and a normal beat never touches the registry; `Worker._beat` publishes
+  the queues and methods again only when `_last_beat` is two intervals old
+  or more (a client may have pruned it after an outage or a sleep), then
+  beats. Registry writes are expensive on a shared drive: do not add any
+  to the normal path. `Client.update_registry_cache(prune=True)`
+  prunes with the connector's default `max_age` before reading, so every
+  refresh (`registry(update=True)`, `alive_workers(update=True)`, cache
+  misses in `cache` mode, `gather` steps) prunes; `prune_dead_workers
+  (max_age)` refreshes with `prune=False`. Queue selection in `always`
+  mode and the worker never prune. Safe because of the per-worker
+  tolerance and because `gather` does not use dead entries.
 - **gather.** `gather(fs, timeout, step, retry_lost, max_age) -> list` of the
   AsyncResults still pending (`[]` = all arrived); `fs` may mix clients and
   `timeout` is one common deadline. Clients are waited sequentially, no
   threads: with a common deadline the outcome is the same. `step` is the
   polling period of the lost-request check, not a wait. `retry_lost` resends
-  only a request it can prove a dead worker took, never one still in the
-  queue. Taken: FIFO evidence, `Client.pending[id]` (last send time, refreshed
-  by `retry`; `creation_time` is not) compared with `metadata.timing.request_sent`
-  of every answered result in `fs` on the same queue ref, whatever its client
-  (same process, same clock). Died: a registered worker with an expired
-  heartbeat whose last beat plus `max_age` is after the send time, or no
-  alive worker at all. Target: an alive queue serving the method, the same
-  one first; none: warn once, flag `AsyncResult.lost` (survives pruning) and
-  resend on a later step. Only `retry=True` requests are resent; no cap,
-  each resend needs fresh evidence. Not decidable: the newest request on a
-  queue (nothing behind it, stays pending; a probe request was tried and
-  rejected as too convoluted) and several alive workers plus a dead one on a
-  queue (a long request may be resent). An earlier FIFO heuristic without
-  the dead-worker and heartbeat-bound conditions was removed for misfiring
-  with several workers. Implementation notes and docs are written in plain
-  English for non-native readers: short sentences, step by step.
+  only a request it can prove is lost, never one still in the queue. Taken:
+  FIFO evidence, `Client.pending[id]` (last send time, refreshed by `retry`;
+  `creation_time` is not) compared with `metadata.timing.request_sent` of
+  every answered result in `fs` on the same queue ref, whatever its client
+  (same process, same clock). Lost: every alive registered worker on the
+  queue (`Client.alive_workers`) answered a request sent after it
+  (`metadata.worker`); a worker runs one request at a time in FIFO order,
+  so none of them can be holding it; no alive worker: holds by itself.
+  Dead entries in the registry are not used, so pruning never hides a loss.
+  Target: an alive queue serving the method, the same one first; none: warn
+  once, flag `AsyncResult.lost` and resend on a later step. Only
+  `retry=True` requests are resent; no cap, each resend needs fresh
+  evidence. Stays pending: the newest request on a queue (nothing behind
+  it; a probe request was tried and rejected as too convoluted) and a queue
+  with an alive worker that answered nothing later (it may hold it).
+  Earlier versions used a dead-worker-with-deadline condition and, before
+  that, a plain FIFO heuristic; both misfired with several workers on one
+  queue. Implementation notes and docs are written in plain English for
+  non-native readers: short sentences, step by step.
 - **Ids.** Request ids are `{client_id}:{n}`; a client id may contain `:`, so
   the responses queue is derived by splitting on the last one.
   `clean_namespace` resets the counters.

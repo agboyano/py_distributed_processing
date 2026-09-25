@@ -10,7 +10,7 @@ from typing import Any, Callable
 import dill
 
 from .async_result import AsyncResult
-from .connector import DEFAULT_HEARTBEAT_MAX_AGE, MISSING, Connector
+from .connector import MISSING, Connector
 from .messages import is_ack, is_batch_response, is_single_response, single_request
 
 logger = logging.getLogger(__name__)
@@ -257,8 +257,32 @@ class Client:
         self.last_request_id = f"{self.client_id}:{str(self.last_request_idnumber)}"
         return self.last_request_id
 
-    def update_registry_cache(self) -> None:
-        "Refreshes the local cache of the methods and workers registries."
+    # Implementation notes.
+    #
+    # A refresh prunes first. It is safe for two reasons. The worker
+    # publishes its heartbeat interval, so `Connector.dead_workers` gives
+    # each worker its own tolerance and a healthy slow worker is not pruned
+    # by mistake. And `gather` decides "lost" from the answers of the alive
+    # workers, not from dead entries in the registry, so a prune at any
+    # moment cannot hide a loss. It is also reversible for a live worker:
+    # one that could not beat for two intervals publishes its queues and
+    # methods again at its next beat (see `Worker.start_heartbeat`). The
+    # prune uses the transport's default `max_age`, not a caller's:
+    # pruning is a shared write and the threshold belongs to the
+    # transport. `prune_dead_workers(max_age)` is the way to use another
+    # one.
+    def update_registry_cache(self, prune: bool = True) -> None:
+        """Refreshes the local cache of the methods and workers registries.
+
+        Args:
+            prune (bool): If True, first unregister the workers whose
+                heartbeat is too old for the connector's default `max_age`
+                (`Connector.prune_dead_workers()`), so the cache does not
+                list dead queues. Defaults to True.
+
+        """
+        if prune:
+            self.connector.prune_dead_workers()
         self._registry["methods"] = self.connector.methods_registry()
         self._registry["workers"] = self.connector.workers_registry()
 
@@ -267,7 +291,8 @@ class Client:
 
         Args:
             update (bool): If True, refresh the cache first with
-                `update_registry_cache`. Defaults to False.
+                `update_registry_cache`, which also prunes the dead
+                workers. Defaults to False.
 
         Returns:
             dict: {"methods": {method: [queue_name, ...]},
@@ -349,9 +374,7 @@ class Client:
     # has a key: it wrote heartbeats while alive and never deleted them.
     # The rule for "too old" lives in `Connector.dead_workers`, so this
     # method, `prune_dead_workers` and `gather` agree.
-    def alive_workers(
-        self, max_age: float = DEFAULT_HEARTBEAT_MAX_AGE, update: bool = True
-    ) -> dict:
+    def alive_workers(self, max_age: float | None = None, update: bool = True) -> dict:
         """Returns the registered workers that look alive, by queue.
 
         A worker is alive if its last heartbeat is not too old (see
@@ -361,10 +384,12 @@ class Client:
         dead are returned with an empty list.
 
         Args:
-            max_age (float): Seconds. The floor of the tolerance. Defaults
-                to `DEFAULT_HEARTBEAT_MAX_AGE` (30 s).
-            update (bool): If True, refresh the registry cache first.
-                Defaults to True.
+            max_age (float, optional): Seconds. The floor of the tolerance.
+                Defaults to None: the connector's
+                `default_heartbeat_max_age` (30 s; 61 s on the filesystem).
+            update (bool): If True, refresh the registry cache first,
+                which also prunes the workers that are dead for the
+                connector's default `max_age`. Defaults to True.
 
         Returns:
             dict: `{queue_name: [worker_id, ...]}` with simple queue names
@@ -382,28 +407,30 @@ class Client:
             for queue_ref, workers in self._registry["workers"].items()
         }
 
-    def prune_dead_workers(self, max_age: float = DEFAULT_HEARTBEAT_MAX_AGE) -> list:
+    def prune_dead_workers(self, max_age: float | None = None) -> list:
         """Unregisters the workers whose heartbeat is too old.
 
         Same as `connector.prune_dead_workers`, and refreshes the registry
-        cache afterwards. Nothing calls this automatically: a worker that
-        dies stays in the registry until someone prunes it. Pruning is not
-        done by a cache refresh or by queue selection on purpose: the right
-        `max_age` depends on the deployment, and a wrong automatic prune
-        would remove a healthy worker, which never registers again.
-        Workers without a heartbeat key are never pruned.
+        cache afterwards. Every cache refresh (`update_registry_cache`,
+        `registry(update=True)`, `alive_workers(update=True)`, a cache
+        miss in 'cache' mode, each `gather` step) does the same with the
+        connector's default `max_age`; call this one for another
+        threshold. Queue selection in 'always' mode reads the connector
+        directly and does not prune. Workers without a heartbeat key are
+        never pruned. A live worker pruned while it could not beat comes
+        back by itself at its next heartbeat.
 
         Args:
-            max_age (float): Seconds. The floor of the tolerance, see
-                `Connector.dead_workers`. Defaults to
-                `DEFAULT_HEARTBEAT_MAX_AGE` (30 s).
+            max_age (float, optional): Seconds. The floor of the tolerance,
+                see `Connector.dead_workers`. Defaults to None: the
+                connector's `default_heartbeat_max_age`.
 
         Returns:
             list: Sorted ids of the pruned workers.
 
         """
         dead = self.connector.prune_dead_workers(max_age)
-        self.update_registry_cache()
+        self.update_registry_cache(prune=False)
         return dead
 
     def _select_queue_ref(self, method: str) -> str:

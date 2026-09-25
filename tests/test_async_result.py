@@ -2,7 +2,7 @@ import threading
 import time
 
 import pytest
-from conftest import add
+from conftest import MemoryConnector, add
 
 from distributed_processing.async_result import FAILED, OK, PENDING, gather
 from distributed_processing.client import Client
@@ -117,7 +117,7 @@ class TestGather:
     # A worker pops a request before running it, so "taken by a worker that
     # died" is simulated by dropping the head of the queue by hand. All the
     # gather calls use max_age=0.1: a worker that beat once and then slept
-    # 0.2 s looks dead while the registry still lists it.
+    # 0.2 s looks dead. The connector default (30 s) does not prune it.
 
     LOST = dict(step=0.1, retry_lost=True, max_age=0.1)
 
@@ -161,13 +161,15 @@ class TestGather:
         client = Client(connector)
         f1 = client.rpc_async("add", [5, 5], queue="q2", retry=True)
         f2 = client.rpc_async("add", [1, 1], queue="q2", retry=True)
+        f3 = client.rpc_async("add", [2, 2], queue="q2", retry=True)
         self._drop_head(connector, "q2")
-        w2.run_once(timeout=0.1)
+        w2.run_once(timeout=0.1)  # answers f2
         self._dies(connector, w2)
-        run_in_thread(self._worker_on_q2(connector), timeout=3)  # replacement
+        # The replacement answers f3, sent after f1: it is not holding f1.
+        run_in_thread(self._worker_on_q2(connector), timeout=3)
         run_in_thread(worker, timeout=3)  # q also serves "add"
 
-        assert gather([f1, f2], timeout=5, **self.LOST) == []
+        assert gather([f1, f2, f3], timeout=5, **self.LOST) == []
         assert f1.retries == 1 and f1.queue == "q2"
         assert f1.get(timeout=1) == 10
 
@@ -207,30 +209,52 @@ class TestGather:
         assert f.retries == 0 and f.lost is False
         assert self._queue_len(connector, "q2") == 1
 
-    def test_retry_lost_skips_when_every_worker_is_alive(self, connector, worker):
-        # The fixture worker has no heartbeat, so it counts as alive.
+    def test_retry_lost_resends_when_the_only_alive_worker_answered_later(
+        self, connector, worker
+    ):
+        # The fixture worker (alive, no heartbeat) answered f2 after f1 was
+        # taken: it runs one request at a time, so it is not holding f1.
         client = Client(connector)
         f1 = client.rpc_async("add", [5, 5], queue="q", retry=True)
         f2 = client.rpc_async("add", [1, 1], queue="q", retry=True)
         self._drop_head(connector, "q")
-        worker.run_once(timeout=0.1)  # answers f2: f1 popped, worker alive
+        worker.run_once(timeout=0.1)  # answers f2
+        run_in_thread(worker, timeout=3)
+
+        assert gather([f1, f2], timeout=5, **self.LOST) == []
+        assert f1.retries == 1 and f1.queue == "q" and f1.get(timeout=1) == 10
+
+    def test_retry_lost_waits_while_an_alive_worker_may_hold_it(
+        self, connector, worker
+    ):
+        # Two alive workers on q: the fixture one answered f2, the other
+        # answered nothing after f1 and may be running it.
+        idle = Worker(connector, heartbeat_interval=None)
+        idle.add_requests_queue("q", {"add": add})
+        idle.update_methods_registry()
+        client = Client(connector)
+        f1 = client.rpc_async("add", [5, 5], queue="q", retry=True)
+        f2 = client.rpc_async("add", [1, 1], queue="q", retry=True)
+        self._drop_head(connector, "q")
+        worker.run_once(timeout=0.1)  # answers f2
 
         assert gather([f1, f2], timeout=0.3, **self.LOST) == [f1]
         assert f1.retries == 0 and f1.lost is False
 
-    def test_retry_lost_ignores_a_worker_dead_before_the_request_was_sent(
-        self, connector
+    def test_retry_lost_does_not_need_the_dead_worker_in_the_registry(
+        self, connector, worker
     ):
-        self._dies(connector, self._worker_on_q2(connector))  # stale entry
-        w3 = self._worker_on_q2(connector)  # alive: no heartbeat
+        w2 = self._worker_on_q2(connector)
         client = Client(connector)
         f1 = client.rpc_async("add", [5, 5], queue="q2", retry=True)
         f2 = client.rpc_async("add", [1, 1], queue="q2", retry=True)
         self._drop_head(connector, "q2")
-        w3.run_once(timeout=0.1)  # answers f2; f1 may be running in w3
+        w2.run_once(timeout=0.1)  # answers f2
+        w2.close()  # gone from the registry, as after a prune
+        run_in_thread(worker, timeout=3)
 
-        assert gather([f1, f2], timeout=0.3, **self.LOST) == [f1]
-        assert f1.retries == 0 and f1.lost is False
+        assert gather([f1, f2], timeout=5, **self.LOST) == []
+        assert f1.retries == 1 and f1.queue == "q" and f1.get(timeout=1) == 10
 
     def test_retry_lost_warns_and_resends_when_a_worker_appears(
         self, connector, caplog
@@ -253,6 +277,29 @@ class TestGather:
         run_in_thread(self._worker_on_q2(connector, mul), timeout=3)
         assert gather([f1], timeout=5, **self.LOST) == []
         assert f1.retries == 1 and f1.queue == "q2" and f1.get(timeout=1) == 6
+
+    def test_retry_lost_uses_the_connector_max_age_and_survives_the_prune(self):
+        class Quick(MemoryConnector):
+            default_heartbeat_max_age = 0.1
+
+        connector = Quick()
+        worker = Worker(connector, heartbeat_interval=None)  # q, always alive
+        worker.add_requests_queue("q", {"add": add})
+        worker.update_methods_registry()
+        w2 = self._worker_on_q2(connector)
+        client = Client(connector)
+        f1 = client.rpc_async("add", [5, 5], queue="q2", retry=True)
+        f2 = client.rpc_async("add", [1, 1], queue="q2", retry=True)
+        self._drop_head(connector, "q2")
+        w2.run_once(timeout=0.1)
+        self._dies(connector, w2)
+        run_in_thread(worker, timeout=3)
+
+        assert gather([f1, f2], timeout=5, step=0.1, retry_lost=True) == []
+        assert f1.retries == 1 and f1.queue == "q"
+        # The first gather step refreshed the cache and pruned w2.
+        assert w2.worker_id not in connector.heartbeats()
+        assert connector.get_requests_queue("q2") not in connector.workers_registry()
 
     def test_retry_lost_flags_but_does_not_resend_without_retry_info(
         self, connector, worker, caplog
