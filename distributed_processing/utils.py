@@ -11,6 +11,8 @@ installed.
 from __future__ import annotations
 
 import atexit
+import base64
+import importlib
 import logging
 import multiprocessing as mp
 import os
@@ -172,16 +174,41 @@ def _watch_parent(worker: Worker) -> None:
     threading.Thread(target=guard, name="parent-guard", daemon=True).start()
 
 
+# Implementation notes.
+#
+# An import path is resolved here, in the child, never in the node. The
+# child is a fresh interpreter, so the import always reads the current
+# file on disk: a new module, or a new version of one, is picked up by the
+# next `create_worker` without restarting the node and without any reload
+# logic. The node process itself never imports user modules.
+def _import_constructor(path: str) -> Callable:
+    """Returns the callable named by an import path `package.module:attr`."""
+    module_name, sep, attr = path.rpartition(":")
+    if not sep or not module_name or not attr:
+        raise ValueError(
+            f"Invalid worker constructor path {path!r}: expected 'package.module:attr'."
+        )
+    module = importlib.import_module(module_name)
+    try:
+        return getattr(module, attr)
+    except AttributeError:
+        raise ValueError(f"Module {module_name!r} has no attribute {attr!r}.") from None
+
+
 def _create_worker(payload: bytes, conn) -> None:
     """Target of the worker subprocesses. Builds the worker, reports and runs it.
 
     Args:
-        payload (bytes): dill blob of `(constructor, args, kwargs)`.
+        payload (bytes): dill blob of `(constructor, args, kwargs)`, where
+            `constructor` is a callable or an import path
+            `package.module:attr` that this process imports.
         conn: Sending end of the pipe to the parent.
 
     """
     try:
         constructor, args, kwargs = deserialize(payload)
+        if isinstance(constructor, str):
+            constructor = _import_constructor(constructor)
         worker = constructor(*args, **kwargs)
     except BaseException:
         conn.send(("error", traceback.format_exc()))
@@ -226,6 +253,7 @@ def node(
     master: Worker,
     workers_constructors: dict | None = None,
     creation_processes_timeout: float = 60,
+    allow_remote_constructors: bool = False,
 ) -> Worker:
     """Turns `master` into a node: a Worker that manages workers in subprocesses.
 
@@ -234,13 +262,33 @@ def node(
     (or locally with `master.exec_method(name, args, queue=master.worker_id)`):
 
     - `create_worker(worker_type, args=None, kwargs=None)`: starts a new
-      subprocess running
-      `workers_constructors[worker_type](*args, **kwargs).run_forever()`
-      and returns `(pid, worker_type, worker_id)`. Raises `ValueError` for
-      an unknown type and `RuntimeError` if the worker did not start: the
-      constructor raised (the message carries the remote traceback) or it
-      did not report within `creation_processes_timeout`. A remote caller
-      gets a `RemoteException`.
+      subprocess running `constructor(*args, **kwargs).run_forever()` and
+      returns `(pid, worker_type, worker_id)`. `worker_type` is a key of
+      `workers_constructors` or an import path `package.module:attr`,
+      which the **subprocess** imports: a module on the node's path can
+      provide new types, or new versions of a type, without restarting
+      the node. Raises `ValueError` for an unknown type and `RuntimeError`
+      if the worker did not start: the constructor raised or could not be
+      imported (the message carries the remote traceback) or it did not
+      report within `creation_processes_timeout`. A remote caller gets a
+      `RemoteException`.
+    - `worker_types()`: sorted names of `workers_constructors`, including
+      the ones added with `create_worker_fn`.
+    - `create_worker_fn(str_fn, args=None, kwargs=None, name=None)`: only
+      if `allow_remote_constructors` is True. Starts a worker from a
+      constructor sent by the client, `str_fn` being the base64-encoded
+      dill payload that `Client.serialize_python_call` builds, so from a
+      client it is
+      `client.rpc_sync("create_worker_fn", serialize_python_call(fn, args, kwargs) + [name], queue=node_id)`.
+      With `name`, the constructor is also added to `workers_constructors`
+      for later `create_worker(name)` calls. Returns
+      `(pid, name or fn.__name__, worker_id)`. The globals the constructor
+      uses travel with it (`serialize_python_call` pickles with
+      `recurse=True`); modules and classes must be importable on the node.
+      Passing the settings (host, namespace, path...) as arguments keeps
+      the constructor reusable. SECURITY WARNING: this executes
+      arbitrary Python code sent by clients, like `eval_py_function`.
+      Only enable it on trusted infrastructure.
     - `list_processes()`: `[(pid, worker_type, worker_id), ...]` of the
       alive worker subprocesses.
     - `kill_process(pid) -> bool`: terminates that worker subprocess,
@@ -279,6 +327,9 @@ def node(
         creation_processes_timeout (float): Maximum seconds to wait for a
             new worker subprocess to report that it started. Defaults
             to 60.
+        allow_remote_constructors (bool): If True, register
+            `create_worker_fn` (see the SECURITY WARNING above). Defaults
+            to False.
 
     Returns:
         Worker: `master`, with the methods above registered and published.
@@ -346,17 +397,11 @@ def node(
         _reap()
         return [wp.pid for wp in list(processes) if _kill_process(wp)]
 
-    def create_worker(
-        worker_type: str, args: list | None = None, kwargs: dict | None = None
-    ) -> tuple:
-        _reap()
-        if worker_type not in workers_constructors:
-            raise ValueError(
-                f"Unknown worker type {worker_type!r}. Known types: {sorted(workers_constructors)}"
-            )
+    def _spawn(constructor, worker_type: str, args, kwargs) -> tuple:
+        "Starts a subprocess for `constructor` (a callable or an import path)."
         args = [] if args is None else args
         kwargs = {} if kwargs is None else kwargs
-        payload = serialize((workers_constructors[worker_type], args, kwargs))
+        payload = serialize((constructor, args, kwargs))
 
         parent_conn, child_conn = _SPAWN.Pipe(duplex=False)
         p = _SPAWN.Process(
@@ -383,6 +428,46 @@ def node(
         )
         return p.pid, worker_type, wp.worker_id
 
+    def create_worker(
+        worker_type: str, args: list | None = None, kwargs: dict | None = None
+    ) -> tuple:
+        _reap()
+        if worker_type in workers_constructors:
+            constructor = workers_constructors[worker_type]
+        elif ":" in worker_type:
+            constructor = worker_type  # an import path, resolved by the subprocess
+        else:
+            raise ValueError(
+                f"Unknown worker type {worker_type!r}. Known types: "
+                f"{sorted(workers_constructors)}; an import path "
+                "'package.module:attr' is also accepted."
+            )
+        return _spawn(constructor, worker_type, args, kwargs)
+
+    def worker_types() -> list:
+        return sorted(workers_constructors)
+
+    # Implementation notes.
+    #
+    # The payload is unpickled here, in the node, and not passed on as
+    # bytes, because a named constructor is kept in `workers_constructors`
+    # for later `create_worker` calls. Unpickling does not run the
+    # constructor; the trust decision is `allow_remote_constructors`.
+    def create_worker_fn(
+        str_fn: str,
+        args: list | None = None,
+        kwargs: dict | None = None,
+        name: str | None = None,
+    ) -> tuple:
+        _reap()
+        constructor = deserialize(base64.b64decode(str_fn))
+        if name is not None:
+            workers_constructors[name] = constructor
+        worker_type = (
+            name if name is not None else getattr(constructor, "__name__", "remote")
+        )
+        return _spawn(constructor, worker_type, args, kwargs)
+
     def cleanup() -> list:
         killed = kill_all_processes()
         master.close()
@@ -390,12 +475,19 @@ def node(
 
     master_funcs: dict[str, Callable] = {
         "create_worker": create_worker,
+        "worker_types": worker_types,
         "list_processes": list_processes,
         "kill_process": kill_process,
         "kill_processes": kill_processes,
         "kill_all_processes": kill_all_processes,
         "cleanup": cleanup,
     }
+    if allow_remote_constructors:
+        master_funcs["create_worker_fn"] = create_worker_fn
+        logger.warning(
+            f"Node {master.worker_id}: create_worker_fn is enabled. It executes "
+            "code sent by clients; trusted infrastructure only."
+        )
 
     master.add_requests_queue(master.worker_id, master_funcs)
     master.update_methods_registry()
@@ -412,12 +504,13 @@ def fsnode(
     workers_constructors: dict | None = None,
     watchdog_timeout: float = 60,
     creation_processes_timeout: float = 60,
+    allow_remote_constructors: bool = False,
 ) -> Worker:
     """Builds a node on a filesystem namespace. See `node`.
 
     Equivalent to `node(fsworker(NS_PATH, ...), workers_constructors,
-    creation_processes_timeout)`. The caller must call `run()` on the
-    returned master Worker to start serving.
+    creation_processes_timeout, allow_remote_constructors)`. The caller
+    must call `run()` on the returned master Worker to start serving.
 
     Args:
         NS_PATH (str): Directory shared by clients and workers.
@@ -437,6 +530,9 @@ def fsnode(
         creation_processes_timeout (float): Maximum seconds to wait for a
             new worker subprocess to report that it started. Defaults
             to 60.
+        allow_remote_constructors (bool): If True, register
+            `create_worker_fn`, which runs code sent by clients. Defaults
+            to False.
 
     Returns:
         Worker: The master Worker, already registered. Call its `run`
@@ -450,7 +546,12 @@ def fsnode(
         worker_id=worker_id,
         watchdog_timeout=watchdog_timeout,
     )
-    return node(master, workers_constructors, creation_processes_timeout)
+    return node(
+        master,
+        workers_constructors,
+        creation_processes_timeout,
+        allow_remote_constructors,
+    )
 
 
 def redisnode(
@@ -463,11 +564,13 @@ def redisnode(
     worker_id: str | None = None,
     workers_constructors: dict | None = None,
     creation_processes_timeout: float = 60,
+    allow_remote_constructors: bool = False,
 ) -> Worker:
     """Builds a node on a Redis namespace. See `node`.
 
     Equivalent to `node(Worker(RedisConnector(...), worker_id=worker_id),
-    workers_constructors, creation_processes_timeout)`. The caller must
+    workers_constructors, creation_processes_timeout,
+    allow_remote_constructors)`. The caller must
     call `run()` on the returned master Worker to start serving. Give the
     node an explicit `worker_id`: it is the queue name a client targets
     with `queue=`, and a generated Redis id contains ':'.
@@ -492,6 +595,9 @@ def redisnode(
         creation_processes_timeout (float): Maximum seconds to wait for a
             new worker subprocess to report that it started. Defaults
             to 60.
+        allow_remote_constructors (bool): If True, register
+            `create_worker_fn`, which runs code sent by clients. Defaults
+            to False.
 
     Returns:
         Worker: The master Worker, already registered. Call its `run`
@@ -504,4 +610,9 @@ def redisnode(
     if clean:
         connector.clean_namespace()
     master = Worker(connector, worker_id=worker_id)
-    return node(master, workers_constructors, creation_processes_timeout)
+    return node(
+        master,
+        workers_constructors,
+        creation_processes_timeout,
+        allow_remote_constructors,
+    )

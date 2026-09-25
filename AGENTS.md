@@ -158,6 +158,14 @@ variables. Read it first.
   dead worker and deletes its heartbeat; `cleanup` closes the master. Each
   child runs an orphan guard (`multiprocessing.parent_process().join()`)
   that closes the worker and exits when the master is killed hard.
+  `create_worker` resolves a type in this order: key of
+  `workers_constructors`, else an import path `package.module:attr` that
+  the **child** imports (the node never imports user modules, so new
+  versions on disk are picked up without a restart), else `ValueError`.
+  `create_worker_fn` (a dill payload from `Client.serialize_python_call`,
+  optionally registered under a name) exists only with
+  `allow_remote_constructors=True`: it runs code sent by clients and is off
+  by default, like `add_python_eval`.
 - **Compatibility.** Other projects call the public API with positional
   arguments. New parameters go last, with a default that keeps the current
   behaviour (`rpc_batch_sync` got `queue` after `timeout` for this reason).

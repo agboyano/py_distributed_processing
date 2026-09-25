@@ -30,6 +30,15 @@ def timestamp() -> str:
 # so they travel whole. Functions imported from a module are still pickled
 # by reference, and the worker must be able to import that module.
 #
+# `recurse=True` is passed explicitly. With dill's default, a function
+# defined in a notebook or in `__main__` travels without the globals it
+# refers to (a constant, an imported class), and the worker raises
+# `NameError` when it runs it. With `recurse=True` dill pickles the globals
+# the function actually uses: values by value, imported modules and
+# classes by reference. `utils` sets the same option in `dill.settings`,
+# so before this the outcome depended on whether `utils` had been
+# imported first.
+#
 # dill.dumps returns bytes, and the params of a request travel through the
 # connector's serializer like any other message. The default serializer on
 # Redis is JSON, which cannot carry bytes, and a future connector may use
@@ -55,11 +64,14 @@ def serialize_python_call(
     Returns:
         list: [base64-encoded dill-serialized `fn`, args, kwargs], the
             positional args expected by the worker's `eval_py_function`.
+            The globals that `fn` uses (constants, imported names) travel
+            with it; modules and classes are referenced by name and must
+            be importable on the worker.
 
     """
     args = [] if args is None else args
     kwargs = {} if kwargs is None else kwargs
-    pickled_fn = dill.dumps(fn)
+    pickled_fn = dill.dumps(fn, recurse=True)
     return [base64.b64encode(pickled_fn).decode("ascii"), args, kwargs]
 
 

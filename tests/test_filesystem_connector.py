@@ -97,13 +97,22 @@ class TestFileSystemConnector:
         pid, _, worker_id = master.exec_method(
             "create_worker", ["w", [str(tmp_path)]], queue="node_it"
         )
+        # the same constructor as an import path, imported by the subprocess
+        pid2, _, worker_id2 = master.exec_method(
+            "create_worker",
+            ["test_filesystem_connector:make_fs_worker", [str(tmp_path)]],
+            queue="node_it",
+        )
 
         client = Client(FileSystemConnector(str(tmp_path)), check_registry="cache")
         q_ref = client.connector.get_requests_queue("q")
-        assert client.connector.workers_registry()[q_ref] == [worker_id]
+        assert sorted(client.connector.workers_registry()[q_ref]) == sorted(
+            [worker_id, worker_id2]
+        )
         assert client.rpc_sync("add", [20, 22], timeout=30) == 42
 
-        assert master.exec_method("kill_all_processes", queue="node_it") == [pid]
+        killed = master.exec_method("kill_all_processes", queue="node_it")
+        assert sorted(killed) == sorted([pid, pid2])
         assert q_ref not in client.connector.workers_registry()
         master.exec_method("cleanup", queue="node_it")
         assert client.connector.heartbeats() == {}

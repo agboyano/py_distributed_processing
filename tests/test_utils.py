@@ -12,6 +12,7 @@ import time
 import pytest
 from conftest import MemoryConnector, add
 
+from distributed_processing.client import serialize_python_call
 from distributed_processing.utils import node
 from distributed_processing.worker import Worker
 
@@ -50,6 +51,7 @@ class Spy:
 
 NODE_METHODS = [
     "create_worker",
+    "worker_types",
     "list_processes",
     "kill_process",
     "kill_processes",
@@ -128,3 +130,45 @@ class TestSubprocesses:
         assert spy.deleted == [worker_id, "node_closure"]
         assert spy.heartbeats() == {}
         assert spy.methods_registry() == {}  # the master is unregistered too
+
+
+class TestDynamicTypes:
+    def test_import_path_is_resolved_in_the_child(self, master):
+        path = "test_utils:make_worker"
+        pid, worker_type, worker_id = call(master, "create_worker", path, ["q5"])
+        assert worker_type == path
+        assert call(master, "list_processes") == [(pid, path, worker_id)]
+
+    def test_bad_import_path_raises_with_the_remote_error(self, master):
+        with pytest.raises(RuntimeError, match="No module named"):
+            call(master, "create_worker", "no_such_module_xyz:make")
+        with pytest.raises(ValueError, match="Unknown worker type"):
+            call(master, "create_worker", "nope")
+        assert call(master, "list_processes") == []
+
+    def test_remote_constructors_are_off_by_default(self, master):
+        assert "create_worker_fn" not in master.connector.methods_registry()
+        assert call(master, "worker_types") == ["broken", "w"]
+
+    def test_create_worker_fn_registers_and_starts(self, caplog):
+        m = Worker(
+            Spy(MemoryConnector()), worker_id="node_remote", heartbeat_interval=None
+        )
+        with caplog.at_level("WARNING", logger="distributed_processing.utils"):
+            node(m, {}, creation_processes_timeout=30, allow_remote_constructors=True)
+        assert any("create_worker_fn" in msg for msg in caplog.messages)
+        try:
+            # anonymous: the type is the function name
+            payload = serialize_python_call(make_worker, ["q6"])
+            pid1, worker_type, _ = call(m, "create_worker_fn", *payload)
+            assert worker_type == "make_worker"
+            # named: registered for later create_worker calls
+            payload = serialize_python_call(make_worker, ["q7"])
+            pid2, worker_type, _ = call(m, "create_worker_fn", *payload, "w2")
+            assert worker_type == "w2"
+            assert call(m, "worker_types") == ["w2"]
+            pid3, _, _ = call(m, "create_worker", "w2", ["q8"])
+            pids = sorted(pid for pid, _, _ in call(m, "list_processes"))
+            assert pids == sorted([pid1, pid2, pid3])
+        finally:
+            call(m, "cleanup")

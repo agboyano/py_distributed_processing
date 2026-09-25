@@ -116,7 +116,12 @@ subprocesses on request (`create_worker`, `list_processes`, `kill_process`...
 via RPC), see `distributed_processing.utils.node`: `fsnode(...)` builds one on
 a shared directory and `redisnode(...)` on Redis. Worker subprocesses always
 start with `spawn`, so a constructor defined in a notebook works; each
-constructor builds its own connector.
+constructor builds its own connector. A worker type may also be an import
+path (`create_worker("pkg.module:make_worker")`): the subprocess imports it
+from disk, so new types and new versions need no node restart. With
+`allow_remote_constructors=True` the node also accepts constructors sent by
+clients (`create_worker_fn`), which runs their code: trusted infrastructure
+only.
 
 ## Connectors and serialization
 

@@ -79,21 +79,43 @@ def worker1(worker_id=None):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--host", type=str, default=REDIS_HOST, help="Redis server address")
-    parser.add_argument("-p", "--port", type=int, default=REDIS_PORT, help="Redis server port")
+    parser.add_argument(
+        "--host", type=str, default=REDIS_HOST, help="Redis server address"
+    )
+    parser.add_argument(
+        "-p", "--port", type=int, default=REDIS_PORT, help="Redis server port"
+    )
     parser.add_argument("-db", type=int, default=REDIS_DB, help="Redis server DB")
-    parser.add_argument("-n", "--namespace", type=str, default=NAMESPACE, help="Namespace to use")
-    parser.add_argument("--node-id", type=str, default=NODE_ID, help="Node id (its queue name)")
-    parser.add_argument("--workers", type=int, default=0, help="Workers to start before serving")
+    parser.add_argument(
+        "-n", "--namespace", type=str, default=NAMESPACE, help="Namespace to use"
+    )
+    parser.add_argument(
+        "--node-id", type=str, default=NODE_ID, help="Node id (its queue name)"
+    )
+    parser.add_argument(
+        "--workers", type=int, default=0, help="Workers to start before serving"
+    )
     parser.add_argument("--clean", action="store_true", help="Clean namespace")
+    # SECURITY: with this flag the node runs constructors sent by clients
+    # (create_worker_fn), like eval_py_function. Trusted infrastructure only.
+    parser.add_argument(
+        "--remote-constructors", action="store_true", help="Enable create_worker_fn"
+    )
     args = parser.parse_args()
 
     # Subprocesses do not inherit the logging configuration; this only
     # applies to the node process.
     logging.basicConfig(level=logging.INFO)
-    REDIS_HOST, REDIS_PORT, REDIS_DB, NAMESPACE = args.host, args.port, args.db, args.namespace
+    REDIS_HOST, REDIS_PORT, REDIS_DB, NAMESPACE = (
+        args.host,
+        args.port,
+        args.db,
+        args.namespace,
+    )
 
-    print(f"Node {args.node_id} on Redis {args.host}:{args.port}, DB {args.db}, namespace {args.namespace}")
+    print(
+        f"Node {args.node_id} on Redis {args.host}:{args.port}, DB {args.db}, namespace {args.namespace}"
+    )
     master = redisnode(
         args.host,
         args.port,
@@ -102,6 +124,7 @@ if __name__ == "__main__":
         clean=args.clean,
         worker_id=args.node_id,
         workers_constructors={"worker1": worker1},
+        allow_remote_constructors=args.remote_constructors,
     )
 
     for _ in range(args.workers):
