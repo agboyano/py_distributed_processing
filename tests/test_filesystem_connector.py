@@ -9,6 +9,16 @@ from distributed_processing.filesystem_connector import FileSystemConnector
 from distributed_processing.worker import Worker
 
 
+def make_fs_worker(path):
+    "Worker constructor for the node test. Runs inside the subprocess."
+    from distributed_processing.utils import fsworker
+
+    w = fsworker(path, watchdog_timeout=5)
+    w.add_requests_queue("q", {"add": lambda a, b: a + b})
+    w.update_methods_registry()
+    return w
+
+
 @pytest.mark.integration
 class TestFileSystemConnector:
     def test_enqueue_pop_round_trip(self, tmp_path):
@@ -74,3 +84,27 @@ class TestFileSystemConnector:
         client_conn = FileSystemConnector(str(tmp_path))
         client = Client(client_conn, check_registry="cache")
         assert client.rpc_sync("add", [20, 22], timeout=10) == 42
+
+    def test_fsnode_round_trip_through_a_spawned_worker(self, tmp_path):
+        from distributed_processing.utils import fsnode
+
+        master = fsnode(
+            str(tmp_path),
+            worker_id="node_it",
+            workers_constructors={"w": make_fs_worker},
+            watchdog_timeout=5,
+        )
+        pid, _, worker_id = master.exec_method(
+            "create_worker", ["w", [str(tmp_path)]], queue="node_it"
+        )
+
+        client = Client(FileSystemConnector(str(tmp_path)), check_registry="cache")
+        q_ref = client.connector.get_requests_queue("q")
+        assert client.connector.workers_registry()[q_ref] == [worker_id]
+        assert client.rpc_sync("add", [20, 22], timeout=30) == 42
+
+        assert master.exec_method("kill_all_processes", queue="node_it") == [pid]
+        assert q_ref not in client.connector.workers_registry()
+        master.exec_method("cleanup", queue="node_it")
+        assert client.connector.heartbeats() == {}
+        assert client.connector.methods_registry() == {}

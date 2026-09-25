@@ -111,8 +111,12 @@ worker = fsworker("/shared/path/ns")   # + add_requests_queue + run()
 client = fsclient("/shared/path/ns")
 ```
 
-To launch a node with several workers in remotely managed subprocesses
-(create/list/kill workers via RPC), see `distributed_processing.utils.fsnode`.
+To launch a *node*, a master worker that starts, lists and kills worker
+subprocesses on request (`create_worker`, `list_processes`, `kill_process`...
+via RPC), see `distributed_processing.utils.node`: `fsnode(...)` builds one on
+a shared directory and `redisnode(...)` on Redis. Worker subprocesses always
+start with `spawn`, so a constructor defined in a notebook works; each
+constructor builds its own connector.
 
 ## Connectors and serialization
 
@@ -447,7 +451,7 @@ distributed_processing/
 ├── redis_connector.py       # Redis transport
 ├── filesystem_connector.py  # filesystem transport (fs_structs)
 ├── exceptions.py            # RemoteException
-└── utils.py                 # fsworker/fsclient/fsnode (filesystem helpers)
+└── utils.py                 # fsworker/fsclient helpers; node/fsnode/redisnode (worker subprocesses)
 ```
 
 `examples/` contains usage notebooks (filesystem, Redis, and a Monte Carlo

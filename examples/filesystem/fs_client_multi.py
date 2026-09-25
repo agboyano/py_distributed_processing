@@ -50,7 +50,8 @@ z3 = client.rpc_sync("create_worker", ["worker1"])
 client.rpc_sync("list_processes", [])
 
 # %%
-client.rpc_sync("kill_process", [z2])
+# create_worker returns [pid, worker_type, worker_id]; kill_process takes the pid.
+client.rpc_sync("kill_process", [z2[0]])
 
 # %%
 print(client.rpc_sync("list_processes", []))

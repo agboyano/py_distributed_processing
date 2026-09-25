@@ -10,7 +10,9 @@ from distributed_processing.utils import fsnode, fsworker
 
 
 def worker1(worker_id=None, watchdog_timeout=60):
-    server = fsworker(NS_PATH, clean=False, worker_id=worker_id, watchdog_timeout=60)
+    server = fsworker(
+        NS_PATH, clean=False, worker_id=worker_id, watchdog_timeout=watchdog_timeout
+    )
 
     def info():
         rq = {}
