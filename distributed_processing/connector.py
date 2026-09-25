@@ -34,14 +34,22 @@ logger = logging.getLogger(__name__)
 # Key families of the value store:
 #   {VARIABLES}{sep}{name}          -> value                shared variables
 #   {HEARTBEATS}{sep}{worker_id}    -> time.time() of the last heartbeat
+#   {HEARTBEAT_INTERVALS}{sep}{worker_id} -> seconds between heartbeats
 METHOD_QUEUES = "method_queues"
 WORKERS_QUEUE = "workers_queue"
 VARIABLES = "variables"
 HEARTBEATS = "heartbeats"
+HEARTBEAT_INTERVALS = "heartbeat_intervals"
+
+# A worker is dead after this many missed heartbeats, when its interval
+# is known: one missed beat and a few seconds of clock skew between
+# machines do not count.
+HEARTBEAT_TOLERANCE = 3
 
 # Seconds without a heartbeat after which a worker is considered dead.
-# Three times the default `Worker.heartbeat_interval` (10 s): one missed
-# beat and a few seconds of clock skew between machines do not count.
+# It is the floor: a worker that publishes a longer interval gets
+# `HEARTBEAT_TOLERANCE` times its interval instead. Three times the default
+# `Worker.heartbeat_interval` (10 s).
 DEFAULT_HEARTBEAT_MAX_AGE = 30.0
 
 # Sentinel for "no default given" in `update_variable`, so that an explicit
@@ -115,19 +123,24 @@ class Connector(ABC):
     Heartbeats
         `heartbeat(worker_id)` stores the writer's `time.time()` under the
         worker id, in its own key family of the value store (so it never
-        shows up in `variables()`). `heartbeats()` returns
-        `{worker_id: time}`. `alive_workers(max_age)` returns the ids whose
-        heartbeat is younger than `max_age` seconds, measured with the
-        reader's clock. `delete_heartbeat(worker_id)` removes it; a worker
-        that stops cleanly does so, a worker that dies leaves a stale one.
-        `prune_dead_workers(max_age)` unregisters and deletes the workers
-        with a stale heartbeat. A registered worker **without** a heartbeat
-        key is never pruned and is not reported as dead: it may be an older
-        version or a worker with heartbeats disabled. No transport expiry
-        (Redis `EXPIRE`) is used, so the rule is the same on every
-        transport. Clocks of the machines are assumed to agree within a
-        few seconds; `max_age` must be at least three times the largest
-        heartbeat interval in use.
+        shows up in `variables()`). The worker sends its heartbeat
+        interval with each beat; `heartbeats()` returns `{worker_id: time}`
+        and `heartbeat_intervals()` returns `{worker_id: seconds}`.
+        `dead_workers(max_age)` holds the rule: a worker is dead when its
+        last heartbeat is older than `max_age`, or older than
+        `HEARTBEAT_TOLERANCE` times its own interval if that is longer,
+        measured with the reader's clock. `alive_workers(max_age)` returns
+        the ids that are not dead. `delete_heartbeat(worker_id)` removes
+        the keys; `Worker.close()` does it, a worker that dies or stops
+        without `close()` leaves a heartbeat that goes stale.
+        `prune_dead_workers(max_age)` unregisters and deletes the dead
+        workers. A registered worker **without** a heartbeat key is never
+        pruned and is not reported as dead: it may be an older version or a
+        worker with heartbeats disabled. No transport expiry (Redis
+        `EXPIRE`) is used, so the rule is the same on every transport.
+        Clocks of the machines are assumed to agree within a few seconds;
+        `max_age` is the floor that absorbs that skew and covers workers
+        that do not publish their interval.
 
     Atomicity
         Every public registry operation runs inside `_registry_lock()`.
@@ -473,7 +486,16 @@ class Connector(ABC):
     #
     # `heartbeats()` tolerates a key deleted between `_value_keys` and
     # `_value_get`: a worker may stop cleanly while a client is reading.
-    def heartbeat(self, worker_id: str) -> None:
+    #
+    # The interval travels with every beat, in its own key family. A
+    # reader cannot know how often a worker beats, and a reader with a
+    # short `max_age` would call a slow worker dead. With the interval
+    # published, `dead_workers` gives each worker its own tolerance. Two
+    # writes per beat cost nothing at the default 10 s, and the key comes
+    # back by itself after a `clean_namespace`. A separate value key, not
+    # a dict in the heartbeat key, keeps the float that older readers
+    # expect.
+    def heartbeat(self, worker_id: str, interval: float | None = None) -> None:
         """Records that `worker_id` is alive now.
 
         Called periodically by `Worker` from its heartbeat thread. The value
@@ -481,9 +503,26 @@ class Connector(ABC):
 
         Args:
             worker_id (str): Id of the worker.
+            interval (float, optional): Seconds between the worker's
+                heartbeats. If given, it is stored too, and readers use
+                `HEARTBEAT_TOLERANCE` times this value as the tolerance for
+                this worker when it is longer than their `max_age`.
+                Defaults to None (not stored).
 
         """
         self._value_set(self._key(HEARTBEATS, worker_id), time.time())
+        if interval is not None:
+            self._value_set(self._key(HEARTBEAT_INTERVALS, worker_id), interval)
+
+    def _values_by_worker(self, family: str) -> dict:
+        prefix = self._key(family) + self.sep
+        out = {}
+        for key in self._value_keys(prefix):
+            try:
+                out[key.removeprefix(prefix)] = self._value_get(key)
+            except KeyError:
+                pass  # deleted meanwhile (clean shutdown of that worker)
+        return out
 
     def heartbeats(self) -> dict:
         """Returns the last heartbeat time of every worker that has one.
@@ -493,56 +532,86 @@ class Connector(ABC):
                 `time.time()` on the worker's machine.
 
         """
-        prefix = self._key(HEARTBEATS) + self.sep
+        return self._values_by_worker(HEARTBEATS)
+
+    def heartbeat_intervals(self) -> dict:
+        """Returns the heartbeat interval of every worker that published one.
+
+        Returns:
+            dict: `{worker_id: seconds}`.
+
+        """
+        return self._values_by_worker(HEARTBEAT_INTERVALS)
+
+    def dead_workers(self, max_age: float = DEFAULT_HEARTBEAT_MAX_AGE) -> dict:
+        """Returns the workers whose heartbeat is too old, with their deadline.
+
+        The deadline of a worker is its last heartbeat plus its tolerance.
+        The tolerance is `max_age`, or `HEARTBEAT_TOLERANCE` times the
+        worker's own interval if that is longer. A worker is dead when the
+        reader's clock is past its deadline. Workers without a heartbeat
+        key are never in the result.
+
+        Args:
+            max_age (float): Seconds. The floor of the tolerance. Defaults
+                to `DEFAULT_HEARTBEAT_MAX_AGE` (30 s).
+
+        Returns:
+            dict: `{worker_id: deadline}`, with `deadline` as a
+                `time.time()` value.
+
+        """
+        now = time.time()
+        intervals = self.heartbeat_intervals()
         out = {}
-        for key in self._value_keys(prefix):
-            try:
-                out[key.removeprefix(prefix)] = self._value_get(key)
-            except KeyError:
-                pass  # deleted meanwhile (clean shutdown of that worker)
+        for worker_id, beat in self.heartbeats().items():
+            tolerance = max(max_age, HEARTBEAT_TOLERANCE * intervals.get(worker_id, 0))
+            if now > beat + tolerance:
+                out[worker_id] = beat + tolerance
         return out
 
     def alive_workers(self, max_age: float = DEFAULT_HEARTBEAT_MAX_AGE) -> set:
         """Returns the ids of the workers with a recent heartbeat.
 
         Args:
-            max_age (float): Seconds. A heartbeat older than this, measured
-                with the reader's clock, means the worker is dead.
-                Defaults to `DEFAULT_HEARTBEAT_MAX_AGE` (30 s).
+            max_age (float): Seconds. The floor of the tolerance, see
+                `dead_workers`. Defaults to `DEFAULT_HEARTBEAT_MAX_AGE`
+                (30 s).
 
         Returns:
-            set: Worker ids whose last heartbeat is at most `max_age` old.
-                Workers without a heartbeat key are not included: see
+            set: Worker ids with a heartbeat that is not too old. Workers
+                without a heartbeat key are not included: see
                 `prune_dead_workers` for how they are treated.
 
         """
-        now = time.time()
-        return {w for w, t in self.heartbeats().items() if now - t <= max_age}
+        return set(self.heartbeats()) - set(self.dead_workers(max_age))
 
     def delete_heartbeat(self, worker_id: str) -> bool:
-        "Deletes the heartbeat of `worker_id`. Returns True if it existed."
-        return self._value_delete(self._key(HEARTBEATS, worker_id))
+        "Deletes the heartbeat and interval of `worker_id`. Returns True if the heartbeat existed."
+        existed = self._value_delete(self._key(HEARTBEATS, worker_id))
+        self._value_delete(self._key(HEARTBEAT_INTERVALS, worker_id))
+        return existed
 
     def prune_dead_workers(self, max_age: float = DEFAULT_HEARTBEAT_MAX_AGE) -> list:
-        """Unregisters the workers whose heartbeat is older than `max_age`.
+        """Unregisters the workers whose heartbeat is too old.
 
         Only workers **with** a stale heartbeat key are pruned: a worker
         that dies never deletes its key. Registered workers without a key
         (older versions, heartbeats disabled, `run_once` only) are left as
-        they are. The heartbeat key of each pruned worker is deleted too.
+        they are. The heartbeat keys of each pruned worker are deleted too.
 
         Args:
-            max_age (float): Seconds. Defaults to
-                `DEFAULT_HEARTBEAT_MAX_AGE` (30 s).
+            max_age (float): Seconds. The floor of the tolerance, see
+                `dead_workers`. Defaults to `DEFAULT_HEARTBEAT_MAX_AGE`
+                (30 s).
 
         Returns:
             list: Sorted ids of the pruned workers.
 
         """
-        now = time.time()
-        dead = sorted(w for w, t in self.heartbeats().items() if now - t > max_age)
+        dead = sorted(self.dead_workers(max_age))
         for worker_id in dead:
             self.unregister_methods(worker_id)
             self.delete_heartbeat(worker_id)
-            logger.info(f"Worker {worker_id} pruned: no heartbeat for {max_age} s.")
+            logger.info(f"Worker {worker_id} pruned: its heartbeat is too old.")
         return dead

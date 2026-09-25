@@ -95,9 +95,10 @@ class Worker:
             None (derive the response queue from the request `id`).
         heartbeat_interval (float, optional): Seconds between heartbeats
             while `run` or `run_forever` is running (see `start_heartbeat`).
-            Defaults to 10. None disables heartbeats. Clients consider a
-            worker dead after `max_age` seconds without a heartbeat (30 by
-            default), so keep `max_age >= 3 * heartbeat_interval`.
+            Defaults to 10. None disables heartbeats. The interval is sent
+            with each heartbeat: a client counts the worker dead after
+            three missed beats, or after its `max_age` (30 s by default)
+            if that is longer.
 
     """
 
@@ -345,13 +346,25 @@ class Worker:
     #
     # `Event.wait(interval)` is the sleep: `stop_heartbeat` sets the event
     # and the thread returns at once instead of after the interval.
+    #
+    # Each beat also sends `heartbeat_interval`. A client cannot know how
+    # often this worker beats, so it uses the published interval to give
+    # it the right tolerance (see `Connector.dead_workers`).
+    #
+    # `stop_heartbeat` does not delete the heartbeat. Only `close` does.
+    # `run` and `run_forever` stop the thread in their `finally`, and a
+    # `KeyboardInterrupt` goes through that `finally` too. If the key were
+    # deleted there, a worker stopped with Ctrl-C and never closed would
+    # stay in the registry with no heartbeat, which means "alive" forever
+    # and impossible to prune. With the last beat left in place, it goes
+    # stale and `prune_dead_workers` removes it.
     def start_heartbeat(self) -> None:
         """Starts the heartbeat thread. Idempotent; no-op if disabled.
 
         Writes one heartbeat immediately and then one every
-        `heartbeat_interval` seconds until `stop_heartbeat`. `run` and
-        `run_forever` call it for you; call it yourself only if you drive
-        the worker with `run_once`.
+        `heartbeat_interval` seconds until `stop_heartbeat`. Each heartbeat
+        also publishes the interval. `run` and `run_forever` call it for
+        you; call it yourself only if you drive the worker with `run_once`.
         """
         if self.heartbeat_interval is None:
             return
@@ -359,12 +372,12 @@ class Worker:
             return
 
         self._heartbeat_stop.clear()
-        self.connector.heartbeat(self.worker_id)
+        self.connector.heartbeat(self.worker_id, self.heartbeat_interval)
 
         def beat():
             while not self._heartbeat_stop.wait(self.heartbeat_interval):
                 try:
-                    self.connector.heartbeat(self.worker_id)
+                    self.connector.heartbeat(self.worker_id, self.heartbeat_interval)
                 except Exception:
                     logger.exception(
                         f"{timestamp()} Worker: {self.worker_id} heartbeat failed."
@@ -376,18 +389,17 @@ class Worker:
         self._heartbeat_thread.start()
 
     def stop_heartbeat(self) -> None:
-        """Stops the heartbeat thread and deletes the worker's heartbeat.
+        """Stops the heartbeat thread. Idempotent.
 
-        A worker that stops cleanly disappears from `alive_workers` at
-        once; a worker that dies leaves a heartbeat that goes stale.
-        Idempotent.
+        The last heartbeat stays in the store. A worker that stops without
+        `close()` goes stale after its tolerance and can be pruned with
+        `prune_dead_workers`. `close()` deletes the heartbeat.
         """
         self._heartbeat_stop.set()
         thread = self._heartbeat_thread
         if thread is not None:
             thread.join(timeout=5)
             self._heartbeat_thread = None
-            self.connector.delete_heartbeat(self.worker_id)
 
     def unregister(self) -> None:
         "Removes the worker's queues and methods from the public registry."
@@ -395,12 +407,17 @@ class Worker:
         self.connector.unregister_methods(self.worker_id)
 
     def close(self) -> None:
-        """Stop the heartbeat and unregister the worker's public queues and methods. Idempotent."""
+        """Stops the heartbeat, unregisters the worker and deletes its heartbeat. Idempotent.
+
+        After `close()` the worker is gone from the registry and from
+        `alive_workers` at once.
+        """
         if self._closed:
             return
         self._closed = True
         self.stop_heartbeat()
         self.unregister()
+        self.connector.delete_heartbeat(self.worker_id)
 
     def __enter__(self) -> Worker:
         return self

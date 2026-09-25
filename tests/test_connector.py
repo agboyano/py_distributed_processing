@@ -258,6 +258,34 @@ class TestHeartbeats:
         assert connector.alive_workers(max_age=60) == {"old", "fresh"}
         assert connector.alive_workers(max_age=0.1) == {"fresh"}
 
+    def test_heartbeat_publishes_the_interval(self, connector):
+        connector.heartbeat("w1", interval=60)
+        connector.heartbeat("w2")
+        assert connector.heartbeat_intervals() == {"w1": 60}
+        assert set(connector.heartbeats()) == {"w1", "w2"}
+
+        assert connector.delete_heartbeat("w1") is True
+        assert connector.heartbeat_intervals() == {}
+        assert set(connector.heartbeats()) == {"w2"}
+
+    def test_dead_workers_use_the_worker_interval(self, connector):
+        q1, q2 = register_two_workers(connector)  # w1 on q1, w2 on q1 and q2
+        # w1 beats slowly and says so: three intervals are its tolerance.
+        connector.heartbeat("w1", interval=1.0)
+        # w2 beats without an interval: max_age is its tolerance.
+        beat = time.time()
+        connector.heartbeat("w2")
+        time.sleep(0.2)
+
+        dead = connector.dead_workers(max_age=0.1)
+        assert set(dead) == {"w2"}
+        assert abs(dead["w2"] - (beat + 0.1)) < 0.05
+        assert connector.alive_workers(max_age=0.1) == {"w1"}
+        assert connector.dead_workers(max_age=60) == {}
+
+        assert connector.prune_dead_workers(max_age=0.1) == ["w2"]
+        assert connector.workers_registry() == {q1: ["w1"]}
+
     def test_heartbeats_are_not_variables(self, connector):
         connector.heartbeat("w1")
         connector.set_variable("w1", "a variable, not a heartbeat")

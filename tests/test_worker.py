@@ -288,18 +288,18 @@ class HeartbeatFailsAfterFirst:
         self._connector = connector
         self.calls = 0
 
-    def heartbeat(self, worker_id):
+    def heartbeat(self, worker_id, interval=None):
         self.calls += 1
         if self.calls > 1:
             raise PermissionError("drive not ready")
-        self._connector.heartbeat(worker_id)
+        self._connector.heartbeat(worker_id, interval)
 
     def __getattr__(self, name):
         return getattr(self._connector, name)
 
 
 class TestHeartbeat:
-    def test_run_beats_while_running_and_deletes_on_return(self, connector):
+    def test_run_beats_while_running_and_keeps_the_last_beat_on_return(self, connector):
         w = Worker(connector, heartbeat_interval=0.05)
         w.add_requests_queue("q", {"add": add})
 
@@ -308,12 +308,18 @@ class TestHeartbeat:
         time.sleep(0.15)
         first = connector.heartbeats()[w.worker_id]
         assert w.worker_id in connector.alive_workers(max_age=1)
+        assert connector.heartbeat_intervals()[w.worker_id] == 0.05
         time.sleep(0.12)
         assert connector.heartbeats()[w.worker_id] > first  # it keeps beating
         t.join(timeout=5)
 
-        assert w.worker_id not in connector.heartbeats()
+        # The thread is gone but the last beat stays: the worker can be
+        # pruned later if nobody closes it.
         assert w._heartbeat_thread is None
+        assert w.worker_id in connector.heartbeats()
+        w.close()
+        assert w.worker_id not in connector.heartbeats()
+        assert connector.heartbeat_intervals() == {}
 
     def test_run_forever_beats_and_stops_with_the_loop(self, connector):
         w = Worker(connector, heartbeat_interval=0.05)
@@ -329,7 +335,26 @@ class TestHeartbeat:
 
         (r,) = pop_responses(connector, "cli")
         assert r["result"] == "bye"
+        assert not w._heartbeat_thread
+        assert w.worker_id in connector.heartbeats()
+        w.close()
         assert w.worker_id not in connector.heartbeats()
+
+    def test_interrupted_worker_can_be_pruned(self, connector):
+        # A worker that leaves `run` without close() (Ctrl-C, for example)
+        # stays registered. Its last beat goes stale, so a prune removes it.
+        w = Worker(connector, heartbeat_interval=0.05)
+        w.add_requests_queue("q2", {"add": add})
+        w.update_methods_registry()
+        w.run(timeout=0.1)
+        assert connector.workers_registry() == {
+            connector.get_requests_queue("q2"): [w.worker_id]
+        }
+        time.sleep(0.2)
+
+        assert connector.prune_dead_workers(max_age=0.1) == [w.worker_id]
+        assert connector.workers_registry() == {}
+        assert connector.heartbeats() == {}
 
     def test_disabled_heartbeat_writes_nothing(self, connector, worker):
         w = Worker(connector, heartbeat_interval=None)

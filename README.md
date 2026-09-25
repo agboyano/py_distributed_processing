@@ -187,12 +187,14 @@ and stays in the registry. Heartbeats let a client tell it apart from a
 worker that is busy with a long task.
 
 While `run` or `run_forever` is running, a daemon thread writes the worker's
-`time.time()` every `heartbeat_interval` seconds (10 by default,
-`Worker(..., heartbeat_interval=None)` disables it). The thread beats even
-while a registered function runs for minutes, which the main loop could not
-do. `close()`, the end of `run` and a `with` block delete the heartbeat, so a
-clean shutdown disappears at once; a dead worker leaves a heartbeat that goes
-stale.
+`time.time()` and its `heartbeat_interval` every `heartbeat_interval` seconds
+(10 by default, `Worker(..., heartbeat_interval=None)` disables it). The
+thread beats even while a registered function runs for minutes, which the
+main loop could not do. `close()` and a `with` block delete the heartbeat and
+unregister the worker, so a clean shutdown disappears at once. The end of
+`run` or `run_forever` only stops the thread: a worker interrupted with
+Ctrl-C keeps its last heartbeat, goes stale, and `prune_dead_workers()` can
+remove it. A dead worker leaves a stale heartbeat too.
 
 ```python
 client.alive_workers()                  # {'my_queue': ['redis_server:3']}, 30 s by default
@@ -202,20 +204,28 @@ client.prune_dead_workers()             # unregister stale workers, returns thei
 
 Rules:
 
-- A worker is dead when its heartbeat is older than `max_age` seconds,
-  measured with the reader's clock. Keep `max_age` at least three times the
-  largest `heartbeat_interval` in use, so one missed beat and a few seconds
-  of clock skew between machines do not count. Detection takes between
-  `max_age` and `max_age + heartbeat_interval` seconds.
+- A worker is dead when its heartbeat is older than its tolerance, measured
+  with the reader's clock. The tolerance is `max_age` (30 s by default) or
+  three times the worker's own `heartbeat_interval`, whichever is longer.
+  So a worker that beats every 60 s is dead after 180 s, whatever the
+  reader's `max_age`. `max_age` is the floor: it absorbs a few seconds of
+  clock skew and covers workers of older versions that do not publish
+  their interval. The rule lives in `Connector.dead_workers`; `alive_workers`,
+  `prune_dead_workers` and `gather` all use it.
 - A registered worker **without** a heartbeat (older version, heartbeats
   disabled, driven with `run_once` only) counts as alive and is never pruned.
   A dead worker always has one: it wrote heartbeats while alive.
-- Nothing prunes automatically. Queue selection does not look at heartbeats;
-  call `prune_dead_workers()` when you want dead queues out of the way.
-- Heartbeats are stored in the value store, in their own key family
-  (`{namespace}:heartbeats:{worker_id}` on Redis, `heartbeats_...` under
-  `variables/` on the filesystem), so they never show up in `variables()`.
-  No transport expiry is used: the rule is the same on every connector.
+- Nothing prunes automatically. Queue selection does not look at heartbeats
+  and a cache refresh does not prune: the right `max_age` depends on the
+  deployment, and a wrong automatic prune would remove a healthy worker,
+  which never registers again. Call `prune_dead_workers()` when you want
+  dead queues out of the way.
+- Heartbeats are stored in the value store, in their own key families
+  (`{namespace}:heartbeats:{worker_id}` and
+  `{namespace}:heartbeat_intervals:{worker_id}` on Redis, `heartbeats_...`
+  and `heartbeat_intervals_...` under `variables/` on the filesystem), so
+  they never show up in `variables()`. No transport expiry is used: the
+  rule is the same on every connector.
 
 `gather` uses the same signal to recover the requests lost with a worker:
 

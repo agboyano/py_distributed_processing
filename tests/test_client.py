@@ -75,6 +75,17 @@ class TestHeartbeats:
         connector.register_methods({q3: {"add": add}}, "w_stale")
         assert client.alive_workers(max_age=0.1)["q3"] == []
 
+    def test_alive_workers_keeps_a_slow_beating_worker(self, connector, client):
+        # The worker published a 1 s interval: a client with a shorter
+        # max_age still gives it three intervals.
+        q2 = connector.get_requests_queue("q2")
+        connector.register_methods({q2: {"add": add}}, "w_slow")
+        connector.heartbeat("w_slow", interval=1.0)
+        time.sleep(0.2)
+
+        assert client.alive_workers(max_age=0.1)["q2"] == ["w_slow"]
+        assert client.prune_dead_workers(max_age=0.1) == []
+
     def test_prune_dead_workers_refreshes_the_cache(self, connector, worker, client):
         q2 = connector.get_requests_queue("q2")
         connector.register_methods({q2: {"mul": add}}, "w_stale")

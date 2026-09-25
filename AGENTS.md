@@ -79,15 +79,24 @@ variables. Read it first.
   variable is missing and no default is given (`None` is a valid default).
   A variable updated with `update_variable` is not written with
   `set_variable`, which bypasses the lock.
-- **Heartbeats.** Stored in the value store under the `heartbeats` key
-  family, implemented once in `Connector` over the value primitives: no
-  transport expiry (`EXPIRE`), the reader compares the stored `time.time()`
-  with its own clock and `max_age` (default 30 s, three times the worker's
-  default interval). The worker beats from a daemon thread started by `run`
-  / `run_forever` and stopped in their `finally` and in `close()`; `run_once`
-  alone never beats. A registered worker without a heartbeat key counts as
-  alive and is never pruned (compatibility). Pruning is explicit
-  (`prune_dead_workers`): nothing in queue selection or in the worker does it.
+- **Heartbeats.** Stored in the value store under the `heartbeats` and
+  `heartbeat_intervals` key families, implemented once in `Connector` over
+  the value primitives: no transport expiry (`EXPIRE`). Each beat also
+  publishes the worker's interval. `Connector.dead_workers(max_age)` is the
+  single place with the rule: dead when the reader's clock is past
+  `last_beat + max(max_age, HEARTBEAT_TOLERANCE * interval)`; it returns
+  `{worker_id: deadline}` and `alive_workers`, `prune_dead_workers` (both
+  layers) and `gather` use it. `max_age` (default 30 s) is the floor, for
+  clock skew and for workers that publish no interval. The worker beats
+  from a daemon thread started by `run` / `run_forever` and stopped in
+  their `finally`; `run_once` alone never beats. Only `close()` deletes the
+  heartbeat (after unregistering): a worker that leaves `run` without
+  `close()` (Ctrl-C) keeps its last beat, goes stale and can be pruned. A
+  registered worker without a heartbeat key counts as alive and is never
+  pruned (compatibility). Pruning is explicit (`prune_dead_workers`):
+  nothing in queue selection, in `update_registry_cache` or in the worker
+  does it, because the right `max_age` depends on the deployment and a
+  healthy worker pruned by mistake never registers again.
 - **gather.** `gather(fs, timeout, step, retry_lost, max_age) -> list` of the
   AsyncResults still pending (`[]` = all arrived); `fs` may mix clients and
   `timeout` is one common deadline. Clients are waited sequentially, no

@@ -295,8 +295,9 @@ class AsyncResult:
 #    be running now in a worker that is alive. We count it as lost only
 #    in two cases. The queue has no alive worker at all. Or the queue has
 #    a registered worker whose heartbeat is too old, and that worker
-#    could have taken the request: the request was sent before the last
-#    heartbeat plus `max_age`. A worker cannot take a request sent after
+#    could have taken the request: the request was sent before the
+#    worker's deadline (its last heartbeat plus its tolerance, see
+#    `Connector.dead_workers`). A worker cannot take a request sent after
 #    its death. This limit matters when an old dead worker stays in the
 #    registry: without it, a slow request on a healthy queue could be
 #    resent.
@@ -344,9 +345,9 @@ def gather(
             to the same queue, by any client in `fs`, has been answered:
             queues are FIFO, so the pending request is not in the queue
             any more. Second, the queue has a registered worker whose
-            heartbeat is older than `max_age` and the request was sent
-            before that worker died, or the queue has no alive worker at
-            all (see `Client.alive_workers`). The request is resent with
+            heartbeat is too old (see `Connector.dead_workers`) and the
+            request was sent before that worker died, or the queue has no
+            alive worker at all. The request is resent with
             `AsyncResult.retry` to a queue with alive workers that serves
             the method: the same queue if it is alive again, otherwise a
             random one. If no such queue exists, a warning is logged once,
@@ -360,8 +361,9 @@ def gather(
             it is still running, so use idempotent functions. Defaults to
             False.
         max_age (float): Seconds without a heartbeat after which a worker
-            counts as dead, passed to `Client.alive_workers`. Workers
-            without heartbeats count as alive. Defaults to
+            counts as dead, or three times its own interval if that is
+            longer (see `Connector.dead_workers`). Workers without
+            heartbeats count as alive. Defaults to
             `DEFAULT_HEARTBEAT_MAX_AGE` (30 s).
 
     Returns:
@@ -418,13 +420,9 @@ def _retry_lost_requests(fs: list, pending: list, max_age: float) -> None:
     for client, ars in by_client.items():
         alive = client.alive_workers(max_age)  # refreshes the registry cache too
         registered = client.registry()["workers"]
-        beats = client.connector.heartbeats()
-        now = time()
+        deadlines = client.connector.dead_workers(max_age)
         # Registered workers with an old heartbeat, by simple queue name.
-        dead = {
-            q: [w for w in ws if w in beats and now - beats[w] > max_age]
-            for q, ws in registered.items()
-        }
+        dead = {q: [w for w in ws if w in deadlines] for q, ws in registered.items()}
 
         for f in ars:
             sent = client.pending.get(f.id)
@@ -436,9 +434,9 @@ def _retry_lost_requests(fs: list, pending: list, max_age: float) -> None:
                 # Step 3 of the notes: a later request was answered.
                 taken = answered.get(queue_ref, float("-inf")) > sent
                 # Step 5: no alive worker, or a dead worker that could
-                # have taken it (sent before its last beat plus max_age).
+                # have taken it (sent before its deadline).
                 by_dead = not alive.get(f.queue) or any(
-                    sent <= beats[w] + max_age for w in dead.get(f.queue, [])
+                    sent <= deadlines[w] for w in dead.get(f.queue, [])
                 )
                 if taken and by_dead:
                     f.lost = newly = True

@@ -347,20 +347,22 @@ class Client:
     # or running an older version never write one, and reporting them dead
     # would make every existing deployment look empty. A dead worker always
     # has a key: it wrote heartbeats while alive and never deleted them.
+    # The rule for "too old" lives in `Connector.dead_workers`, so this
+    # method, `prune_dead_workers` and `gather` agree.
     def alive_workers(
         self, max_age: float = DEFAULT_HEARTBEAT_MAX_AGE, update: bool = True
     ) -> dict:
         """Returns the registered workers that look alive, by queue.
 
-        A worker is alive if its last heartbeat is at most `max_age`
-        seconds old (reader's clock), or if it has no heartbeat at all
+        A worker is alive if its last heartbeat is not too old (see
+        `Connector.dead_workers`: `max_age`, or three times its own
+        interval if that is longer), or if it has no heartbeat at all
         (heartbeats disabled or not started). Queues whose workers are all
         dead are returned with an empty list.
 
         Args:
-            max_age (float): Seconds. Defaults to
-                `DEFAULT_HEARTBEAT_MAX_AGE` (30 s). Use at least three times
-                the largest `Worker.heartbeat_interval` in use.
+            max_age (float): Seconds. The floor of the tolerance. Defaults
+                to `DEFAULT_HEARTBEAT_MAX_AGE` (30 s).
             update (bool): If True, refresh the registry cache first.
                 Defaults to True.
 
@@ -371,27 +373,29 @@ class Client:
         """
         if update:
             self.update_registry_cache()
-        beats = self.connector.heartbeats()
-        now = time.time()
-
-        def is_alive(worker_id):
-            return worker_id not in beats or now - beats[worker_id] <= max_age
+        dead = self.connector.dead_workers(max_age)
 
         return {
-            self.simple_queue_name(queue_ref): sorted(w for w in workers if is_alive(w))
+            self.simple_queue_name(queue_ref): sorted(
+                w for w in workers if w not in dead
+            )
             for queue_ref, workers in self._registry["workers"].items()
         }
 
     def prune_dead_workers(self, max_age: float = DEFAULT_HEARTBEAT_MAX_AGE) -> list:
-        """Unregisters the workers whose heartbeat is older than `max_age`.
+        """Unregisters the workers whose heartbeat is too old.
 
         Same as `connector.prune_dead_workers`, and refreshes the registry
         cache afterwards. Nothing calls this automatically: a worker that
-        dies stays in the registry until someone prunes it. Workers without
-        a heartbeat key are never pruned.
+        dies stays in the registry until someone prunes it. Pruning is not
+        done by a cache refresh or by queue selection on purpose: the right
+        `max_age` depends on the deployment, and a wrong automatic prune
+        would remove a healthy worker, which never registers again.
+        Workers without a heartbeat key are never pruned.
 
         Args:
-            max_age (float): Seconds. Defaults to
+            max_age (float): Seconds. The floor of the tolerance, see
+                `Connector.dead_workers`. Defaults to
                 `DEFAULT_HEARTBEAT_MAX_AGE` (30 s).
 
         Returns:
