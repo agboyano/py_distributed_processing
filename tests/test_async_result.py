@@ -112,56 +112,161 @@ class TestGather:
         pending = client.rpc_async("add", [2, 2])  # no worker running now
         assert gather([done, pending], timeout=0.2, step=0.1) == [pending]
 
-    def _dead_worker_on_q2(self, connector):
-        # w2 serves "add" on q2, beats once and "dies": its heartbeat goes
-        # stale while the registry still lists it.
-        w2 = Worker(connector, heartbeat_interval=None)
-        w2.add_requests_queue("q2", {"add": add})
-        w2.update_methods_registry()
-        connector.heartbeat(w2.worker_id)
-        return w2
+    # --- retry_lost -------------------------------------------------------
+    #
+    # A worker pops a request before running it, so "taken by a worker that
+    # died" is simulated by dropping the head of the queue by hand. All the
+    # gather calls use max_age=0.1: a worker that beat once and then slept
+    # 0.2 s looks dead while the registry still lists it.
 
-    def test_retry_dead_resends_to_a_queue_with_alive_workers(self, connector, worker):
-        self._dead_worker_on_q2(connector)
+    LOST = dict(step=0.1, retry_lost=True, max_age=0.1)
+
+    def _worker_on_q2(self, connector, methods=None):
+        w = Worker(connector, heartbeat_interval=None)
+        w.add_requests_queue("q2", methods or {"add": add})
+        w.update_methods_registry()
+        return w
+
+    def _dies(self, connector, w):
+        "One last beat, then long enough for it to be older than max_age."
+        connector.heartbeat(w.worker_id)
+        time.sleep(0.2)
+
+    def _drop_head(self, connector, queue):
+        connector.queues[connector.get_requests_queue(queue)].popleft()
+
+    def _queue_len(self, connector, queue):
+        return len(connector.queues.get(connector.get_requests_queue(queue), []))
+
+    def test_retry_lost_resends_a_request_taken_by_a_dead_worker(
+        self, connector, worker
+    ):
+        w2 = self._worker_on_q2(connector)
         client = Client(connector)
-        f = client.rpc_async("add", [5, 5], queue="q2", retry=True)
-        time.sleep(0.2)  # older than max_age below
+        f1 = client.rpc_async("add", [5, 5], queue="q2", retry=True)
+        f2 = client.rpc_async("add", [1, 1], queue="q2", retry=True)
+        self._drop_head(connector, "q2")  # w2 took f1 and never answered
+        w2.run_once(timeout=0.1)  # ...but it answered f2: f1 was popped
+        self._dies(connector, w2)
         run_in_thread(worker, timeout=3)  # the fixture worker serves q
 
-        assert gather([f], timeout=5, step=0.1, retry_dead=True, max_age=0.1) == []
-        assert f.retries == 1
-        assert f.queue == "q"
-        assert f.get(timeout=1) == 10
+        assert gather([f1, f2], timeout=5, **self.LOST) == []
+        assert f1.retries == 1 and f1.queue == "q" and f1.lost is False
+        assert f1.get(timeout=1) == 10 and f2.get(timeout=1) == 2
 
-    def test_retry_dead_skips_no_retry_info_and_alive_queues(self, connector, worker):
-        self._dead_worker_on_q2(connector)
+    def test_retry_lost_prefers_the_same_queue_when_a_new_worker_serves_it(
+        self, connector, worker
+    ):
+        w2 = self._worker_on_q2(connector)
         client = Client(connector)
-        no_info = client.rpc_async("add", [1, 1], queue="q2", retry=False)
-        alive = client.rpc_async("add", [2, 2], queue="q", retry=True)
-        time.sleep(0.2)
-        # No worker running: the fixture worker has no heartbeat, so q counts
-        # as alive and nothing is resent there; q2 is dead but no_info cannot
-        # be retried.
-        pending = gather(
-            [no_info, alive], timeout=0.3, step=0.1, retry_dead=True, max_age=0.1
-        )
+        f1 = client.rpc_async("add", [5, 5], queue="q2", retry=True)
+        f2 = client.rpc_async("add", [1, 1], queue="q2", retry=True)
+        self._drop_head(connector, "q2")
+        w2.run_once(timeout=0.1)
+        self._dies(connector, w2)
+        run_in_thread(self._worker_on_q2(connector), timeout=3)  # replacement
+        run_in_thread(worker, timeout=3)  # q also serves "add"
 
-        assert pending == [no_info, alive]
-        assert no_info.retries == 0 and no_info.queue == "q2"
-        assert alive.retries == 0 and alive.queue == "q"
+        assert gather([f1, f2], timeout=5, **self.LOST) == []
+        assert f1.retries == 1 and f1.queue == "q2"
+        assert f1.get(timeout=1) == 10
 
-    def test_retry_dead_resends_once_to_the_same_queue_if_no_alternative(
+    def test_retry_lost_uses_the_answers_of_other_clients(self, connector, worker):
+        w2 = self._worker_on_q2(connector)
+        c1, c2 = Client(connector), Client(connector)
+        f1 = c1.rpc_async("add", [5, 5], queue="q2", retry=True)
+        f2 = c2.rpc_async("add", [1, 1], queue="q2", retry=True)
+        self._drop_head(connector, "q2")  # w2 took f1 (client 1)
+        w2.run_once(timeout=0.1)  # and answered f2 (client 2)
+        self._dies(connector, w2)
+        run_in_thread(worker, timeout=3)
+
+        assert gather([f1, f2], timeout=5, **self.LOST) == []
+        assert f1.retries == 1 and f1.get(timeout=1) == 10
+
+    def test_retry_lost_cannot_check_the_newest_request(self, connector):
+        # Nothing was sent after f, so nothing can prove that w2 took it,
+        # even with a new worker on q2. Documented gap.
+        w2 = self._worker_on_q2(connector)
+        client = Client(connector)
+        f = client.rpc_async("add", [2, 3], queue="q2", retry=True)
+        self._drop_head(connector, "q2")
+        self._dies(connector, w2)
+        run_in_thread(self._worker_on_q2(connector), timeout=1)
+
+        assert gather([f], timeout=0.3, **self.LOST) == [f]
+        assert f.retries == 0 and f.lost is False
+
+    def test_retry_lost_leaves_a_request_still_in_the_queue(self, connector):
+        w2 = self._worker_on_q2(connector)
+        client = Client(connector)
+        f = client.rpc_async("add", [2, 3], queue="q2", retry=True)
+        self._dies(connector, w2)  # dead, but f is still in the queue
+
+        assert gather([f], timeout=0.3, **self.LOST) == [f]
+        assert f.retries == 0 and f.lost is False
+        assert self._queue_len(connector, "q2") == 1
+
+    def test_retry_lost_skips_when_every_worker_is_alive(self, connector, worker):
+        # The fixture worker has no heartbeat, so it counts as alive.
+        client = Client(connector)
+        f1 = client.rpc_async("add", [5, 5], queue="q", retry=True)
+        f2 = client.rpc_async("add", [1, 1], queue="q", retry=True)
+        self._drop_head(connector, "q")
+        worker.run_once(timeout=0.1)  # answers f2: f1 popped, worker alive
+
+        assert gather([f1, f2], timeout=0.3, **self.LOST) == [f1]
+        assert f1.retries == 0 and f1.lost is False
+
+    def test_retry_lost_ignores_a_worker_dead_before_the_request_was_sent(
         self, connector
     ):
-        # Only q2 serves "mul", and its worker is dead: resend once to q2.
-        w2 = Worker(connector, heartbeat_interval=None)
-        w2.add_requests_queue("q2", {"mul": lambda a, b: a * b})
-        w2.update_methods_registry()
-        connector.heartbeat(w2.worker_id)
+        self._dies(connector, self._worker_on_q2(connector))  # stale entry
+        w3 = self._worker_on_q2(connector)  # alive: no heartbeat
         client = Client(connector)
-        f = client.rpc_async("mul", [2, 3], retry=True)
-        time.sleep(0.2)
+        f1 = client.rpc_async("add", [5, 5], queue="q2", retry=True)
+        f2 = client.rpc_async("add", [1, 1], queue="q2", retry=True)
+        self._drop_head(connector, "q2")
+        w3.run_once(timeout=0.1)  # answers f2; f1 may be running in w3
 
-        assert gather([f], timeout=0.5, step=0.1, retry_dead=True, max_age=0.1) == [f]
-        assert f.retries == 1 and f.queue == "q2"
-        assert len(connector.queues[connector.get_requests_queue("q2")]) == 2
+        assert gather([f1, f2], timeout=0.3, **self.LOST) == [f1]
+        assert f1.retries == 0 and f1.lost is False
+
+    def test_retry_lost_warns_and_resends_when_a_worker_appears(
+        self, connector, caplog
+    ):
+        mul = {"mul": lambda a, b: a * b}
+        w2 = self._worker_on_q2(connector, mul)  # only q2 serves "mul"
+        client = Client(connector)
+        f1 = client.rpc_async("mul", [2, 3], retry=True)
+        f2 = client.rpc_async("mul", [1, 1], retry=True)
+        self._drop_head(connector, "q2")
+        w2.run_once(timeout=0.1)
+        self._dies(connector, w2)
+
+        with caplog.at_level("WARNING", logger="distributed_processing.async_result"):
+            assert gather([f1, f2], timeout=0.3, **self.LOST) == [f1]
+        assert f1.lost is True and f1.retries == 0
+        assert self._queue_len(connector, "q2") == 0  # nothing resent
+        assert caplog.text.count("will be resent when one appears") == 1
+
+        run_in_thread(self._worker_on_q2(connector, mul), timeout=3)
+        assert gather([f1], timeout=5, **self.LOST) == []
+        assert f1.retries == 1 and f1.queue == "q2" and f1.get(timeout=1) == 6
+
+    def test_retry_lost_flags_but_does_not_resend_without_retry_info(
+        self, connector, worker, caplog
+    ):
+        w2 = self._worker_on_q2(connector)
+        client = Client(connector)
+        no_info = client.rpc_async("add", [1, 1], queue="q2", retry=False)
+        f2 = client.rpc_async("add", [2, 2], queue="q2", retry=True)
+        self._drop_head(connector, "q2")
+        w2.run_once(timeout=0.1)
+        self._dies(connector, w2)
+        run_in_thread(worker, timeout=3)  # q is alive and serves "add"
+
+        with caplog.at_level("WARNING", logger="distributed_processing.async_result"):
+            assert gather([no_info, f2], timeout=0.5, **self.LOST) == [no_info]
+        assert no_info.lost is True and no_info.retries == 0
+        assert "created without retry=True" in caplog.text

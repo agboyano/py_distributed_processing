@@ -38,6 +38,11 @@ class AsyncResult:
         queue (str, optional): Simple name of the queue where the request
             was sent. Defaults to None.
 
+    Attributes:
+        lost (bool): True when `gather(retry_lost=True)` found out that a
+            worker took the request and died before answering. Reset to
+            False by `retry`.
+
     """
 
     def __init__(
@@ -57,6 +62,7 @@ class AsyncResult:
         self.request = request
         self.queue = queue
         self.retries = 0
+        self.lost = False
         self.metadata: dict = {}
 
     def ok(self) -> bool:
@@ -235,6 +241,7 @@ class AsyncResult:
             self.queue = new_queue
             assert new_id == self.id
             self.retries += 1
+            self.lost = False
             return True
         else:
             logger.debug(
@@ -258,30 +265,68 @@ class AsyncResult:
 # another client is being waited on. Threads would only add an executor
 # and cross-thread exceptions.
 #
-# `step` bounds each `wait_responses` call so that the loop wakes up and
-# can run the dead-queue check; without `retry_dead` it only changes how
-# many iterations happen, not the outcome.
+# `step` limits how long each `wait_responses` call blocks. The loop
+# wakes up after `step` seconds and runs the lost-request check. Without
+# `retry_lost`, `step` only changes the number of iterations, not the
+# result.
 #
-# A request is resent at most once (`retries > 0` is skipped). "No alive
-# worker" is read from `Client.alive_workers`: a queue missing from the
-# registry (pruned, or never registered) or present with an empty list. A
-# queue added with `register=False` therefore always looks dead: its
-# request is resent once to the same queue. Resending a request that was
-# still in the queue duplicates it if a worker comes back, hence the
-# idempotency note in the docstring.
+# Lost requests, step by step.
+#
+# 1. A worker takes a request out of the queue and then runs it. There
+#    is no list of requests in progress. If the worker dies while it
+#    runs the request, the request is gone. Nobody will answer it.
+#
+# 2. A request that is still in the queue is not lost. A new worker will
+#    take it later. We must not resend it: it would run twice.
+#
+# 3. From the client we cannot look inside a queue. But queues are FIFO.
+#    So if a request sent later to the same queue has been answered, the
+#    earlier request is no longer in the queue. A worker took it.
+#
+# 4. We compare times. For an answered request, the worker sends back
+#    `metadata.timing.request_sent`: the time when the client built the
+#    message. For a pending request we use `Client.pending[id]`: the time
+#    of its last send. `retry` updates that time; `creation_time` does
+#    not. All the clients in one `gather` call run in the same process,
+#    so their clocks are the same and every answered request in `fs` is
+#    evidence, no matter which client sent it.
+#
+# 5. "A worker took it" is not the same as "it is lost". The request may
+#    be running now in a worker that is alive. We count it as lost only
+#    in two cases. The queue has no alive worker at all. Or the queue has
+#    a registered worker whose heartbeat is too old, and that worker
+#    could have taken the request: the request was sent before the last
+#    heartbeat plus `max_age`. A worker cannot take a request sent after
+#    its death. This limit matters when an old dead worker stays in the
+#    registry: without it, a slow request on a healthy queue could be
+#    resent.
+#
+# 6. The `lost` flag on the AsyncResult remembers the decision. It is
+#    needed because the request may have to wait for a queue with alive
+#    workers, and because `prune_dead_workers` can remove the dead worker
+#    from the registry in the meantime. `retry` clears the flag. A resent
+#    request needs new evidence, so there is no limit on the number of
+#    resends.
+#
+# 7. Two cases cannot be decided from the client. First, the newest
+#    request on a queue: nothing was sent after it, so nothing can prove
+#    that a worker took it. It stays pending. Second, two or more alive
+#    workers on one queue plus a dead one: a long request running in an
+#    alive worker may be resent when another worker answers a later
+#    request. This is why the docstring asks for idempotent functions.
 def gather(
     fs: list,
     timeout: float | None = None,
     step: float = 5.0,
-    retry_dead: bool = False,
+    retry_lost: bool = False,
     max_age: float = DEFAULT_HEARTBEAT_MAX_AGE,
 ) -> list:
     """Waits for the responses of a list of AsyncResults.
 
     The AsyncResults may come from different `Client` instances. The wait
     is a loop: every `step` seconds the pending ones are checked and, with
-    `retry_dead=True`, the requests stuck in a queue without alive workers
-    are resent.
+    `retry_lost=True`, the requests taken by a worker that died before
+    answering are resent.
 
     Args:
         fs (list): AsyncResult objects, possibly from different clients.
@@ -290,18 +335,30 @@ def gather(
             None, which waits until every response has arrived.
         step (float): Seconds each call to `Client.wait_responses` blocks
             before control returns to this loop. It is the polling period
-            of the dead-queue check, not a waiting time: with
-            `retry_dead=False` it does not change the result. With N
+            of the lost-request check, not a waiting time: with
+            `retry_lost=False` it does not change the result. With N
             clients one iteration lasts up to N * step. Defaults to 5.
-        retry_dead (bool): If True, a pending request whose queue has no
-            alive worker (see `Client.alive_workers`) is resent once with
-            `AsyncResult.retry`: to a queue with alive workers that serves
-            the method if there is one, otherwise to the same queue. Only
-            requests created with `retry=True` can be resent. If the
-            request was still in the queue and a worker comes back, it
-            runs twice, so the function must be idempotent. A queue added
-            with `register=False` is not in the registry and always looks
-            dead. Defaults to False.
+        retry_lost (bool): If True, `gather` resends the pending requests
+            that a worker took from the queue and did not answer because
+            it died. Two conditions must hold. First, a request sent later
+            to the same queue, by any client in `fs`, has been answered:
+            queues are FIFO, so the pending request is not in the queue
+            any more. Second, the queue has a registered worker whose
+            heartbeat is older than `max_age` and the request was sent
+            before that worker died, or the queue has no alive worker at
+            all (see `Client.alive_workers`). The request is resent with
+            `AsyncResult.retry` to a queue with alive workers that serves
+            the method: the same queue if it is alive again, otherwise a
+            random one. If no such queue exists, a warning is logged once,
+            the AsyncResult gets `lost=True` and it is resent when a later
+            step finds a queue. Only requests created with `retry=True`
+            are resent; the others get `lost=True` and a log line.
+            A request still in the queue is never resent. The newest
+            request on a queue cannot be checked, because nothing was sent
+            after it: it stays pending. With two or more alive workers on
+            one queue plus a dead one, a long request may be resent while
+            it is still running, so use idempotent functions. Defaults to
+            False.
         max_age (float): Seconds without a heartbeat after which a worker
             counts as dead, passed to `Client.alive_workers`. Workers
             without heartbeats count as alive. Defaults to
@@ -315,7 +372,7 @@ def gather(
     Examples:
         fs = [c1.rpc_async("add", [1, 2], retry=True), c2.rpc_async("add", [3, 4], retry=True)]
         gather(fs, timeout=60)                       # [] if both arrived in time
-        gather(fs, timeout=60, retry_dead=True)      # resend what sits on a dead queue
+        gather(fs, timeout=60, retry_lost=True)      # resend what a dead worker took
         [f.get() for f in fs]
 
     """
@@ -324,8 +381,8 @@ def gather(
         pending = [f for f in fs if f.pending()]
         if not pending:
             return []
-        if retry_dead:
-            _retry_on_dead_queues(pending, max_age)
+        if retry_lost:
+            _retry_lost_requests(fs, pending, max_age)
         if deadline is not None and time() >= deadline:
             return pending
 
@@ -337,24 +394,80 @@ def gather(
             client.wait_responses(ids, timeout=wait)
 
 
-def _retry_on_dead_queues(pending: list, max_age: float) -> None:
-    "Resends, once, the pending requests whose queue has no alive worker."
+def _last_answered(fs: list) -> dict:
+    "Latest `request_sent` among the answered requests, by queue ref."
+    out: dict = {}
+    for f in fs:
+        if not f.done():
+            continue
+        queue_ref = f.metadata.get("queue")
+        sent = f.metadata.get("timing", {}).get("request_sent")
+        if queue_ref is None or sent is None:
+            continue  # answered by an old worker version, no metadata
+        out[queue_ref] = max(out.get(queue_ref, sent), sent)
+    return out
+
+
+def _retry_lost_requests(fs: list, pending: list, max_age: float) -> None:
+    "Marks the pending requests that a dead worker took and resends them."
+    answered = _last_answered(fs)
     by_client: dict = {}
     for f in pending:
         by_client.setdefault(f._client, []).append(f)
 
     for client, ars in by_client.items():
         alive = client.alive_workers(max_age)  # refreshes the registry cache too
+        registered = client.registry()["workers"]
+        beats = client.connector.heartbeats()
+        now = time()
+        # Registered workers with an old heartbeat, by simple queue name.
+        dead = {
+            q: [w for w in ws if w in beats and now - beats[w] > max_age]
+            for q, ws in registered.items()
+        }
+
         for f in ars:
-            if f.request is None or f.retries > 0 or alive.get(f.queue):
+            sent = client.pending.get(f.id)
+            if sent is None:
+                continue
+            newly = False
+            if not f.lost:
+                queue_ref = client.connector.get_requests_queue(f.queue)
+                # Step 3 of the notes: a later request was answered.
+                taken = answered.get(queue_ref, float("-inf")) > sent
+                # Step 5: no alive worker, or a dead worker that could
+                # have taken it (sent before its last beat plus max_age).
+                by_dead = not alive.get(f.queue) or any(
+                    sent <= beats[w] + max_age for w in dead.get(f.queue, [])
+                )
+                if taken and by_dead:
+                    f.lost = newly = True
+                    logger.warning(
+                        f"{timestamp()} gather: request {f.id} is lost. A worker "
+                        f"took it from queue {f.queue} and died (dead workers: "
+                        f"{dead.get(f.queue, [])}). A later request was answered."
+                    )
+            if not f.lost:
+                continue
+
+            if f.request is None:
+                if newly:
+                    logger.warning(
+                        f"{timestamp()} gather: request {f.id} cannot be resent. "
+                        f"It was created without retry=True."
+                    )
                 continue
             method = f.request[0]
-            live_queues = [
-                q for q in client.all_queues_for_method(method) if alive.get(q)
-            ]
-            target = random.choice(live_queues) if live_queues else None
+            live = [q for q in client.all_queues_for_method(method) if alive.get(q)]
+            if not live:
+                log = logger.warning if newly else logger.debug
+                log(
+                    f"{timestamp()} gather: no alive worker serves {method}. "
+                    f"Request {f.id} will be resent when one appears."
+                )
+                continue
+            target = f.queue if f.queue in live else random.choice(live)
             logger.warning(
-                f"{timestamp()} gather: queue {f.queue} has no alive worker. "
-                f"Retrying request {f.id} on queue {target or f.queue}."
+                f"{timestamp()} gather: resending lost request {f.id} to queue {target}."
             )
             f.retry(queue=target)

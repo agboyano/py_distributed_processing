@@ -23,8 +23,8 @@ transport is pluggable via **connectors**: Redis or a shared filesystem
 - Notifications (requests without a response), optional acks and retries
   (`AsyncResult.retry`). `gather(fs, timeout)` waits for AsyncResults of
   several clients at once and returns the ones still pending; with
-  `retry_dead=True` it resends the requests stuck on a queue whose workers
-  are dead.
+  `retry_lost=True` it resends the requests that a worker took and never
+  answered because it died.
 - Sending arbitrary Python functions serialized with `dill`
   (`rpc_async_fn` + `Worker.add_python_eval`). **See security note.**
 - Connectors: Redis (`RedisConnector`) and filesystem
@@ -217,21 +217,43 @@ Rules:
   `variables/` on the filesystem), so they never show up in `variables()`.
   No transport expiry is used: the rule is the same on every connector.
 
-`gather` uses the same signal to recover requests lost with a worker:
+`gather` uses the same signal to recover the requests lost with a worker:
 
 ```python
 fs = [client.rpc_async("price", [isin], retry=True) for isin in isins]
-pending = gather(fs, timeout=600, retry_dead=True)   # [] when everything arrived
+pending = gather(fs, timeout=600, retry_lost=True)   # [] when everything arrived
 ```
 
-Every `step` seconds (5 by default) it checks the pending requests. One whose
-queue has no alive worker is resent once with `AsyncResult.retry`: to a queue
-with alive workers that serves the method if there is one, otherwise to the
-same queue. Only requests created with `retry=True` can be resent, and a
-request that was still in the queue runs twice if a worker comes back, so use
-`retry_dead` with idempotent functions. `gather` works across several
-`Client` instances with one common `timeout` and returns the AsyncResults
-still pending.
+A worker takes a request out of the queue and then runs it. If the worker
+dies while it runs the request, the request is gone. A request that is still
+in the queue is not lost: a new worker will take it later, and it must not
+be resent, because it would run twice. Every `step` seconds (5 by default)
+`gather` checks the pending requests. It resends a request, with
+`AsyncResult.retry`, when two conditions hold:
+
+- A worker took it. Queues are FIFO, so if a request sent later to the same
+  queue has been answered, the pending request is no longer in the queue.
+  The answers of every client in the call count as evidence.
+- That worker died. The queue has a registered worker whose heartbeat is
+  older than `max_age`, and the request was sent before that worker died
+  (before its last heartbeat plus `max_age`). Or the queue has no alive
+  worker at all. An old dead entry in the registry cannot cause the resend
+  of a request sent after its death.
+
+The request goes to a queue with alive workers that serves the method: the
+same queue if it is alive again (a new worker), otherwise a random one. If
+there is no such queue, `gather` logs a warning once, sets `lost=True` on
+the AsyncResult and resends it as soon as a later step finds a queue. Only
+requests created with `retry=True` are resent; the others get `lost=True`
+and a log line. There is no limit: a resent request needs new evidence to be
+resent again.
+
+Two cases cannot be decided from the client. The newest request on a queue:
+nothing was sent after it, so nothing can prove that a worker took it, and it
+stays pending. Two or more alive workers on one queue plus a dead one: a long
+request may be resent while it is still running in an alive worker. Use
+idempotent functions. `gather` works across several `Client` instances with
+one common `timeout` and returns the AsyncResults still pending.
 
 ### Connector contract
 

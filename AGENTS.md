@@ -18,7 +18,7 @@ pluggable **connector**: Redis or a shared directory (`fs_structs`).
   `eval_py_function`.
 - `distributed_processing/async_result.py`: `AsyncResult`, `gather` (waits
   for AsyncResults of several clients, returns the pending ones,
-  `retry_dead` resends what sits on a queue without alive workers).
+  `retry_lost` resends what a dead worker took).
 - `distributed_processing/messages.py`: message construction and predicates.
 - `distributed_processing/connector.py`: `Connector` base class. Its docstring
   is the transport contract: names, queues, registry, variables, heartbeats,
@@ -88,15 +88,27 @@ variables. Read it first.
   alone never beats. A registered worker without a heartbeat key counts as
   alive and is never pruned (compatibility). Pruning is explicit
   (`prune_dead_workers`): nothing in queue selection or in the worker does it.
-- **gather.** `gather(fs, timeout, step, retry_dead, max_age) -> list` of the
+- **gather.** `gather(fs, timeout, step, retry_lost, max_age) -> list` of the
   AsyncResults still pending (`[]` = all arrived); `fs` may mix clients and
   `timeout` is one common deadline. Clients are waited sequentially, no
   threads: with a common deadline the outcome is the same. `step` is the
-  polling period of the dead-queue check, not a wait. `retry_dead` resends a
-  request at most once, only if created with `retry=True`, to a queue with
-  alive workers serving the method or else to the same queue. The old FIFO
-  "looks lost" heuristic was removed on purpose: it misfires with several
-  workers on one queue.
+  polling period of the lost-request check, not a wait. `retry_lost` resends
+  only a request it can prove a dead worker took, never one still in the
+  queue. Taken: FIFO evidence, `Client.pending[id]` (last send time, refreshed
+  by `retry`; `creation_time` is not) compared with `metadata.timing.request_sent`
+  of every answered result in `fs` on the same queue ref, whatever its client
+  (same process, same clock). Died: a registered worker with an expired
+  heartbeat whose last beat plus `max_age` is after the send time, or no
+  alive worker at all. Target: an alive queue serving the method, the same
+  one first; none: warn once, flag `AsyncResult.lost` (survives pruning) and
+  resend on a later step. Only `retry=True` requests are resent; no cap,
+  each resend needs fresh evidence. Not decidable: the newest request on a
+  queue (nothing behind it, stays pending; a probe request was tried and
+  rejected as too convoluted) and several alive workers plus a dead one on a
+  queue (a long request may be resent). An earlier FIFO heuristic without
+  the dead-worker and heartbeat-bound conditions was removed for misfiring
+  with several workers. Implementation notes and docs are written in plain
+  English for non-native readers: short sentences, step by step.
 - **Ids.** Request ids are `{client_id}:{n}`; a client id may contain `:`, so
   the responses queue is derived by splitting on the last one.
   `clean_namespace` resets the counters.
