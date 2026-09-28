@@ -139,8 +139,11 @@ variables. Read it first.
   queue. Implementation notes and docs are written in plain English for
   non-native readers: short sentences, step by step.
 - **Ids.** Request ids are `{client_id}:{n}`; a client id may contain `:`, so
-  the responses queue is derived by splitting on the last one.
-  `clean_namespace` resets the counters.
+  the responses queue is derived by splitting on the last one. `n` starts at
+  the client's creation time in microseconds (`time.time_ns() // 1_000`), so
+  instances that reuse an explicit `client_id` do not repeat ids without any
+  roundtrip; the format did not change. `clean_namespace` resets the
+  counters of client and worker ids.
 - **Worker.** A registered function does not receive the worker: it reaches
   shared variables or `stop()` through a closure. `add_python_eval` executes
   arbitrary code sent by clients: trusted infrastructure only, and say so

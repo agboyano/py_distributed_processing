@@ -87,7 +87,11 @@ class Client:
             `FileSystemConnector`). Messages are handed to the connector as
             Python objects; the connector owns the wire encoding.
         client_id (str, optional): Client identifier. Defaults to None.
-            If None, a new one is requested to the connector.
+            If None, a new one is requested to the connector. A reused id
+            shares the responses queue with the previous instance; the
+            request ids do not collide because the request counter starts
+            at the creation time (see `generate_id`), but two instances
+            alive at the same time must not share a `client_id`.
         check_registry (str): How to choose the queue of a request sent
             **without** an explicit `queue`. Defaults to 'cache'. An
             explicit `queue` is always used as is, in every mode: the
@@ -116,6 +120,30 @@ class Client:
 
     """
 
+    # Implementation notes.
+    #
+    # The request counter starts at the creation time in microseconds, not
+    # at 0. A `client_id` given by the caller may have been used before (a
+    # scheduled script that keeps a fixed responses queue, a reconnection).
+    # Two instances with the same `client_id` write to the same responses
+    # queue, and with a counter starting at 0 both would send
+    # `{client_id}:1`, `{client_id}:2`, ... A response left in the queue by
+    # the old instance, or one still to come from a request in flight,
+    # would then be taken as the answer to a new request: a wrong result
+    # with no error. Acks are keyed by id too.
+    #
+    # The wall clock keeps the ids of successive instances apart without a
+    # roundtrip. A collision needs the old instance to have sent more than
+    # one request per microsecond on average since it was created, or a
+    # clock skew of that size between two machines sharing a client id:
+    # not possible with a transport roundtrip per send. Before Python 3.13
+    # the Windows clock ticks every ~15 ms, so two instances created inside
+    # one tick get the same seed; with a real transport the constructor
+    # itself takes longer than that. The id format `{client_id}:{n}` does
+    # not change, so the worker still derives the responses queue with
+    # `get_reply_to_from_id`. Two instances alive at the same time with the
+    # same `client_id` share one single-consumer queue and take each
+    # other's responses whatever the ids are: that is not covered.
     def __init__(
         self,
         connector: Connector,
@@ -159,7 +187,7 @@ class Client:
             f"{timestamp()} Client: {self.client_id} with responses queue: {self.responses_queue} connected"
         )
 
-        self.last_request_idnumber = 0
+        self.last_request_idnumber = time.time_ns() // 1_000
         self.last_request_id = None
 
         self.set_default_queue(default_queue)
@@ -264,7 +292,16 @@ class Client:
         return self.connector.requests_queue_name(queue_ref)
 
     def generate_id(self) -> str:
-        "Generates a new request id with format {client_id}:{n}."
+        """Generates a new request id with format `{client_id}:{n}`.
+
+        `n` grows by one per request and starts at the creation time of the
+        instance in microseconds, so successive instances that reuse a
+        `client_id` do not repeat ids (see the notes above `__init__`).
+
+        Returns:
+            str: The new id, also stored in `last_request_id`.
+
+        """
         self.last_request_idnumber += 1
         self.last_request_id = f"{self.client_id}:{str(self.last_request_idnumber)}"
         return self.last_request_id

@@ -348,7 +348,9 @@ only provides a few primitives. The full rules live in the docstring of
   connector gets them from the value store primitives.
 - **Names.** `get_requests_queue(name)` / `requests_queue_name(ref)` round
   trip; `get_responses_queue(client_id)`; `get_reply_to_from_id("{client_id}:{n}")`
-  is the responses queue of that client.
+  is the responses queue of that client. `n` is chosen by the client and
+  starts at its creation time in microseconds, so instances that reuse a
+  `client_id` do not repeat ids.
 
 Every public registry operation runs inside `_registry_lock()`; the
 filesystem connector uses a file lock there, Redis needs none because its

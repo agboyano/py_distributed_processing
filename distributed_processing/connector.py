@@ -71,7 +71,9 @@ class Connector(ABC):
         with `sep` and, if the transport needs it, prefixes a namespace.
         `requests_queue_name(get_requests_queue(q)) == q` for any simple
         name `q` without `sep`. Request ids are `{client_id}:{n}` (built by
-        `Client`); a client id may itself contain ``:`` (Redis ids do), so
+        `Client`; `n` starts at the client's creation time in microseconds,
+        so instances that reuse a client id do not repeat ids); a client id
+        may itself contain ``:`` (Redis ids do), so
         `get_reply_to_from_id` splits on the last one and
         `get_reply_to_from_id(f"{cid}:{n}") == get_responses_queue(cid)`.
         Ids from `get_client_id` and `get_server_id` are unique for the life

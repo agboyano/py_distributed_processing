@@ -13,8 +13,29 @@ class TestBasics:
     def test_generate_id_increments(self, client):
         id_1 = client.generate_id()
         id_2 = client.generate_id()
-        assert id_1 == f"{client.client_id}:1"
-        assert id_2 == f"{client.client_id}:2"
+        prefix_1, n_1 = id_1.rsplit(":", 1)
+        prefix_2, n_2 = id_2.rsplit(":", 1)
+        assert prefix_1 == prefix_2 == client.client_id
+        assert int(n_2) == int(n_1) + 1
+
+    def test_generate_id_starts_at_creation_time(self, connector, monkeypatch):
+        monkeypatch.setattr(time, "time_ns", lambda: 5_000_000)
+        c = Client(connector, client_id="c")
+        assert c.generate_id() == "c:5001"
+
+    def test_reused_client_id_does_not_repeat_ids(self, connector, monkeypatch):
+        # Two clients created one after the other with the same explicit
+        # client_id: the counter is seeded with the creation time, so the
+        # ids of the second are all greater than the ids of the first.
+        monkeypatch.setattr(time, "time_ns", lambda: 1_000_000)
+        first = Client(connector, client_id="c")
+        ids_first = [first.generate_id() for _ in range(3)]
+        monkeypatch.setattr(time, "time_ns", lambda: 2_000_000)
+        second = Client(connector, client_id="c")
+        ids_second = [second.generate_id() for _ in range(3)]
+        assert set(ids_first).isdisjoint(ids_second)
+        n = lambda id_: int(id_.rsplit(":", 1)[1])  # noqa: E731
+        assert max(n(i) for i in ids_first) < min(n(i) for i in ids_second)
 
     def test_registry_uses_simple_queue_names(self, client):
         registry = client.registry()
